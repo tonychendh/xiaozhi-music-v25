@@ -1,0 +1,38 @@
+name: Build Boards
+
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: 'Board variant to build'
+        required: true
+        default: 'xmini-c3'
+        type: choice
+        options:
+          - xmini-c3
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ inputs.board }}
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build current variant
+        shell: bash
+        run: |
+          source $IDF_PATH/export.sh
+          python scripts/release.py ${{ inputs.board }} --name ${{ inputs.board }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi_${{ inputs.board }}_${{ github.sha }}.bin
+          path: build/merged-binary.bin
+          if-no-files-found: error
