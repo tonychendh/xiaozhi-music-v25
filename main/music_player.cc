@@ -19,6 +19,41 @@
 
 #define TAG "MusicPlayer"
 
+// 唤醒词引擎刚释放时堆最干净，此时预创建重采样器可抢到大块连续内存；
+// 复杂度从高到低逐级尝试（低复杂度系数表更小）
+bool MusicPlayer::EnsureResampler(int src_rate, int out_channels, int out_rate) {
+    if (resampler_ != nullptr && resampler_src_rate_ == src_rate) {
+        return true;
+    }
+    DestroyResampler();
+    for (int complexity = 2; complexity >= 0; --complexity) {
+        esp_ae_rate_cvt_cfg_t cfg = {
+            .src_rate = static_cast<uint32_t>(src_rate),
+            .dest_rate = static_cast<uint32_t>(out_rate),
+            .channel = static_cast<uint8_t>(out_channels),
+            .bits_per_sample = ESP_AUDIO_BIT16,
+            .complexity = static_cast<uint8_t>(complexity),
+            .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED,
+        };
+        auto ret = esp_ae_rate_cvt_open(&cfg, &resampler_);
+        if (ret == ESP_AUDIO_ERR_OK && resampler_ != nullptr) {
+            resampler_src_rate_ = src_rate;
+            ESP_LOGI(TAG, "重采样器就绪: %d->%d ch=%d 复杂度=%d", src_rate, out_rate, out_channels, complexity);
+            return true;
+        }
+        ESP_LOGW(TAG, "重采样器创建失败(复杂度=%d): %d", complexity, ret);
+    }
+    return false;
+}
+
+void MusicPlayer::DestroyResampler() {
+    if (resampler_ != nullptr) {
+        esp_ae_rate_cvt_close(resampler_);
+        resampler_ = nullptr;
+        resampler_src_rate_ = 0;
+    }
+}
+
 struct MusicPlayer::TaskArgs {
     MusicPlayer* player = nullptr;
     std::string url;
@@ -118,6 +153,14 @@ void MusicPlayer::Run(TaskArgs* args) {
         audio_service_->EnableWakeWordDetection(false);
         audio_service_->ReleaseWakeWordResources();
     }
+    // 唤醒词刚释放时堆最干净，立刻预创建重采样器占住大块连续内存
+    // （mp3 常见 44100Hz；若流是其它采样率，解码时再重建）
+    if (!EnsureResampler(44100, codec->output_channels(), codec->output_sample_rate())) {
+        ESP_LOGW(TAG, "预创建重采样器失败，解码阶段会再次尝试");
+    }
+    ESP_LOGI(TAG, "内存水位: 空闲=%u 最大块=%u",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
 
     constexpr int kReadBufSize = 2048;
     constexpr int kMaxZeroReads = 30;  // 连续空读约 3 秒视为流结束，容忍网络抖动
@@ -127,7 +170,6 @@ void MusicPlayer::Run(TaskArgs* args) {
     bool playback_finished = false;
     esp_audio_err_t ret = ESP_AUDIO_ERR_OK;
     esp_audio_simple_dec_handle_t decoder = nullptr;
-    esp_ae_rate_cvt_handle_t resampler = nullptr;
     uint8_t* in_buf = nullptr;
     uint8_t* out_buf = nullptr;
     bool info_ready = false;
@@ -290,21 +332,23 @@ void MusicPlayer::Run(TaskArgs* args) {
 
                 // 采样率不一致时重采样，避免变速/变调
                 if (stream_sample_rate != codec->output_sample_rate()) {
-                    if (resampler == nullptr) {
-                        esp_ae_rate_cvt_cfg_t cfg = {
-                            .src_rate = static_cast<uint32_t>(stream_sample_rate),
-                            .dest_rate = static_cast<uint32_t>(codec->output_sample_rate()),
-                            .channel = static_cast<uint8_t>(codec->output_channels()),
-                            .bits_per_sample = ESP_AUDIO_BIT16,
-                            .complexity = 2,
-                            .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED,
-                        };
-                        auto cvt_ret = esp_ae_rate_cvt_open(&cfg, &resampler);
-                        if (resampler == nullptr) {
-                            ESP_LOGE(TAG, "创建重采样器失败: %d", cvt_ret);
-                            playback_failed = true;
-                            break;
-                        }
+                    if (!EnsureResampler(stream_sample_rate, codec->output_channels(), codec->output_sample_rate())) {
+                        ESP_LOGE(TAG, "创建重采样器失败，无法播放该采样率的音频");
+                        playback_failed = true;
+                        break;
+                    }
+                    uint32_t in_samples = static_cast<uint32_t>(pcm.size() / codec->output_channels());
+                    uint32_t out_samples = 0;
+                    esp_ae_rate_cvt_get_max_out_sample_num(resampler_, in_samples, &out_samples);
+                    std::vector<int16_t> resampled(out_samples * codec->output_channels());
+                    uint32_t actual_out = out_samples;
+                    esp_ae_rate_cvt_process(resampler_,
+                                            reinterpret_cast<esp_ae_sample_t>(pcm.data()), in_samples,
+                                            reinterpret_cast<esp_ae_sample_t>(resampled.data()),
+                                            &actual_out);
+                    resampled.resize(actual_out * codec->output_channels());
+                    pcm = std::move(resampled);
+                }
                     }
                     uint32_t in_samples = static_cast<uint32_t>(pcm.size() / codec->output_channels());
                     uint32_t out_samples = 0;
@@ -334,9 +378,6 @@ void MusicPlayer::Run(TaskArgs* args) {
         }
     } while (false);
 
-    if (resampler != nullptr) {
-        esp_ae_rate_cvt_close(resampler);
-    }
     if (in_buf != nullptr) {
         heap_caps_free(in_buf);
     }
