@@ -795,7 +795,17 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
     }
     SetDeviceState(kDeviceStateIdle);
     audio_service_.ResetDecoder();
-    return music_player_.Start(url, title, artist, audio_service_);
+    // C3 无 PSRAM：音乐 TLS 连接需要 ~17KB 连续内存，播放期间释放唤醒词引擎，
+    // 播放结束（完成/失败/停止）后由回调在主任务中恢复。
+    audio_service_.EnableWakeWordDetection(false);
+    audio_service_.ReleaseWakeWordResources();
+    return music_player_.Start(url, title, artist, audio_service_, [this]() {
+        Schedule([this]() {
+            if (GetDeviceState() == kDeviceStateIdle) {
+                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+            }
+        });
+    });
 }
 
 void Application::StopMusicPlayback() {

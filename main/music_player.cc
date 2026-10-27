@@ -36,7 +36,7 @@ std::string MusicPlayer::current_title() const {
 }
 
 bool MusicPlayer::Start(const std::string& url, const std::string& title, const std::string& artist,
-                        AudioService& audio_service) {
+                        AudioService& audio_service, std::function<void()> on_finished) {
     if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
         ESP_LOGW(TAG, "无效的音乐链接: %s", url.c_str());
         return false;
@@ -57,6 +57,7 @@ bool MusicPlayer::Start(const std::string& url, const std::string& title, const 
 
     Stop();
     audio_service_ = &audio_service;
+    on_finished_ = std::move(on_finished);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         current_title_ = title;
@@ -94,6 +95,8 @@ void MusicPlayer::TaskEntry(void* arg) {
     auto* self = args->player;
     self->Run(args.get());
     self->task_handle_.store(nullptr);
+    // FreeRTOS 任务函数禁止 return，必须自行删除（否则返回到空指针触发 Guru Meditation）
+    vTaskDelete(nullptr);
 }
 
 void MusicPlayer::Run(TaskArgs* args) {
@@ -129,8 +132,17 @@ void MusicPlayer::Run(TaskArgs* args) {
     auto http = network->CreateHttp(3);
     do {
         http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-        if (auto opened = http->Open("GET", url); !opened) {
-            ESP_LOGE(TAG, "无法打开音频链接: %s (%s)", url.c_str(), opened.error().ToString().c_str());
+        bool opened_ok = false;
+        for (int attempt = 0; attempt < 2 && !stop_requested_.load(); ++attempt) {
+            if (auto opened = http->Open("GET", url); opened) {
+                opened_ok = true;
+                break;
+            }
+            ESP_LOGW(TAG, "打开音频链接失败，%d ms 后重试", 800);
+            vTaskDelay(pdMS_TO_TICKS(800));
+        }
+        if (!opened_ok) {
+            ESP_LOGE(TAG, "无法打开音频链接: %s", url.c_str());
             playback_failed = true;
             break;
         }
@@ -350,5 +362,11 @@ void MusicPlayer::Run(TaskArgs* args) {
         ESP_LOGW(TAG, "音乐播放失败");
     } else if (playback_finished) {
         ESP_LOGI(TAG, "音乐播放结束，输出 %u samples", static_cast<unsigned>(total_output_samples));
+    }
+
+    if (on_finished_) {
+        auto cb = std::move(on_finished_);
+        on_finished_ = nullptr;
+        cb();
     }
 }
