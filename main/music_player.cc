@@ -129,8 +129,8 @@ void MusicPlayer::Run(TaskArgs* args) {
     auto http = network->CreateHttp(3);
     do {
         http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-        if (!http->Open("GET", url)) {
-            ESP_LOGE(TAG, "无法打开音频链接: %s", url.c_str());
+        if (auto opened = http->Open("GET", url); !opened) {
+            ESP_LOGE(TAG, "无法打开音频链接: %s (%s)", url.c_str(), opened.error().ToString().c_str());
             playback_failed = true;
             break;
         }
@@ -176,12 +176,13 @@ void MusicPlayer::Run(TaskArgs* args) {
         }
 
         while (!stop_requested_.load()) {
-            int read_bytes = http->Read(reinterpret_cast<char*>(in_buf), kReadBufSize);
-            if (read_bytes < 0) {
-                ESP_LOGW(TAG, "读取音频流失败: %d", read_bytes);
+            auto read_res = http->Read(reinterpret_cast<char*>(in_buf), kReadBufSize);
+            if (!read_res) {
+                ESP_LOGW(TAG, "读取音频流失败: %s", read_res.error().ToString().c_str());
                 playback_failed = true;
                 break;
             }
+            int read_bytes = read_res.value();
             if (read_bytes == 0) {
                 zero_read_count++;
                 if (zero_read_count >= kMaxZeroReads) {
