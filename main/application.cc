@@ -800,7 +800,10 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
     return music_player_.Start(url, title, artist, audio_service_, [this]() {
         Schedule([this]() {
             if (GetDeviceState() == kDeviceStateIdle) {
-                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+                // C3 走 lite 引擎，IsAfeWakeWord() 恒为 false，必须无条件恢复
+                // （EnableWakeWordDetection 内部会自行判断有无唤醒词模型）
+                ESP_LOGI(TAG, "音乐结束，恢复唤醒词引擎");
+                audio_service_.EnableWakeWordDetection(true);
             }
         });
     });
