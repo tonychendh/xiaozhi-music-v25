@@ -111,6 +111,13 @@ void MusicPlayer::Run(TaskArgs* args) {
     }
     // HTTP 流不经过音频通道，需手动关闭 WiFi 省电，避免下载卡顿
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    // 等主循环把 idle 状态的唤醒词引擎拉起后，再关掉并释放它：
+    // C3 无 PSRAM，音乐 TLS 连接需要 ~17KB 连续内存，必须让 AFE 腾位置
+    vTaskDelay(pdMS_TO_TICKS(400));
+    if (audio_service_ != nullptr) {
+        audio_service_->EnableWakeWordDetection(false);
+        audio_service_->ReleaseWakeWordResources();
+    }
 
     constexpr int kReadBufSize = 2048;
     constexpr int kMaxZeroReads = 30;  // 连续空读约 3 秒视为流结束，容忍网络抖动
