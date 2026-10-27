@@ -8,6 +8,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include "esp_ae_rate_cvt.h"
 
 class AudioService;
 
@@ -40,6 +41,11 @@ private:
     std::atomic<TaskHandle_t> task_handle_{nullptr};
     AudioService* audio_service_ = nullptr;
     std::function<void()> on_finished_;
+    esp_ae_rate_cvt_handle_t resampler_ = nullptr;
+    int resampler_src_rate_ = 0;
+    std::string resampler_key_;  // src_rate+ch 组合，避免重复创建
+    bool EnsureResampler(int src_rate, int out_channels, int out_rate);
+    void DestroyResampler();
     mutable std::mutex mutex_;
     std::string last_url_;
     int64_t last_finished_ms_ = 0;
