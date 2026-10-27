@@ -36,3 +36,4 @@ jobs:
           name: xiaozhi_${{ inputs.board }}_${{ github.sha }}.bin
           path: build/merged-binary.bin
           if-no-files-found: error
+# touch re-register
