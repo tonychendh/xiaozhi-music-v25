@@ -136,7 +136,9 @@ void MusicPlayer::Run(TaskArgs* args) {
                 default:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_60_MS;  break;
             }
             esp_opus_dec_cfg_t cfg = {
-                .sample_rate = static_cast<uint32_t>(sample_rate),
+                // 关键：Opus 只支持 48/24/16/12/8k，忽略 OpusHead 记录的源采样率（如 44100），
+                // 与官方 TTS 解码一致，直接按 codec 输出率创建（内部自动重采样）
+                .sample_rate = static_cast<uint32_t>(codec->output_sample_rate()),
                 .channel = 1,
                 .frame_duration = frame_dur,
                 .self_delimited = false,
@@ -149,7 +151,8 @@ void MusicPlayer::Run(TaskArgs* args) {
             }
             decoder_ready = true;
             decoder_sample_rate = sample_rate;
-            ESP_LOGI(TAG, "Opus 解码器就绪: %dHz %dms 帧", sample_rate, frame_duration_ms);
+            ESP_LOGI(TAG, "Opus 解码器就绪: 输出%dHz（流标注%dHz %dms 帧）",
+                     codec->output_sample_rate(), sample_rate, frame_duration_ms);
         }
 
         esp_audio_dec_in_raw_t raw = {
