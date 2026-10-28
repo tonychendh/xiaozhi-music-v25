@@ -4,6 +4,9 @@
 #include "audio_codec.h"
 #include "board.h"
 #include "system_info.h"
+#include "audio/demuxer/ogg_demuxer.h"
+#include "esp_audio_dec_default.h"
+#include "esp_opus_dec.h"
 
 #include <algorithm>
 #include <cstring>
@@ -12,47 +15,8 @@
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
-#include "esp_audio_dec_default.h"
-#include "esp_audio_simple_dec.h"
-#include "esp_audio_simple_dec_default.h"
-#include "esp_ae_rate_cvt.h"
 
 #define TAG "MusicPlayer"
-
-// 唤醒词引擎刚释放时堆最干净，此时预创建重采样器可抢到大块连续内存；
-// 复杂度从高到低逐级尝试（低复杂度系数表更小）
-bool MusicPlayer::EnsureResampler(int src_rate, int out_channels, int out_rate) {
-    if (resampler_ != nullptr && resampler_src_rate_ == src_rate) {
-        return true;
-    }
-    DestroyResampler();
-    for (int complexity = 2; complexity >= 0; --complexity) {
-        esp_ae_rate_cvt_cfg_t cfg = {
-            .src_rate = static_cast<uint32_t>(src_rate),
-            .dest_rate = static_cast<uint32_t>(out_rate),
-            .channel = static_cast<uint8_t>(out_channels),
-            .bits_per_sample = ESP_AUDIO_BIT16,
-            .complexity = static_cast<uint8_t>(complexity),
-            .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED,
-        };
-        auto ret = esp_ae_rate_cvt_open(&cfg, &resampler_);
-        if (ret == ESP_AUDIO_ERR_OK && resampler_ != nullptr) {
-            resampler_src_rate_ = src_rate;
-            ESP_LOGI(TAG, "重采样器就绪: %d->%d ch=%d 复杂度=%d", src_rate, out_rate, out_channels, complexity);
-            return true;
-        }
-        ESP_LOGW(TAG, "重采样器创建失败(复杂度=%d): %d", complexity, ret);
-    }
-    return false;
-}
-
-void MusicPlayer::DestroyResampler() {
-    if (resampler_ != nullptr) {
-        esp_ae_rate_cvt_close(resampler_);
-        resampler_ = nullptr;
-        resampler_src_rate_ = 0;
-    }
-}
 
 struct MusicPlayer::TaskArgs {
     MusicPlayer* player = nullptr;
@@ -92,7 +56,6 @@ bool MusicPlayer::Start(const std::string& url, const std::string& title, const 
 
     Stop();
     audio_service_ = &audio_service;
-    on_finished_ = std::move(on_finished);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         current_title_ = title;
@@ -102,7 +65,7 @@ bool MusicPlayer::Start(const std::string& url, const std::string& title, const 
 
     auto* args = new TaskArgs{this, url, title, artist};
     TaskHandle_t handle = nullptr;
-    if (xTaskCreate(&MusicPlayer::TaskEntry, "music_playback", 12288, args, 3, &handle) != pdPASS) {
+    if (xTaskCreate(&MusicPlayer::TaskEntry, "music_playback", 8192, args, 3, &handle) != pdPASS) {
         delete args;
         playing_.store(false);
         audio_service_ = nullptr;
@@ -130,7 +93,7 @@ void MusicPlayer::TaskEntry(void* arg) {
     auto* self = args->player;
     self->Run(args.get());
     self->task_handle_.store(nullptr);
-    // FreeRTOS 任务函数禁止 return，必须自行删除（否则返回到空指针触发 Guru Meditation）
+    // FreeRTOS 任务函数禁止 return，必须自行删除
     vTaskDelete(nullptr);
 }
 
@@ -139,45 +102,87 @@ void MusicPlayer::Run(TaskArgs* args) {
     auto& board = Board::GetInstance();
     auto codec = board.GetAudioCodec();
     auto network = board.GetNetwork();
-    ESP_LOGI(TAG, "开始播放音乐: %s - %s", args->title.c_str(), args->artist.c_str());
+    ESP_LOGI(TAG, "开始播放音乐（Opus 流）: %s - %s", args->title.c_str(), args->artist.c_str());
 
-    if (audio_service_ != nullptr) {
-        audio_service_->SetExternalPlaybackActive(true);
-    }
-    // HTTP 流不经过音频通道，需手动关闭 WiFi 省电，避免下载卡顿
-    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-    // 等主循环把 idle 状态的唤醒词引擎拉起后，再关掉并释放它：
-    // C3 无 PSRAM，音乐 TLS 连接需要 ~17KB 连续内存，必须让 AFE 腾位置
-    vTaskDelay(pdMS_TO_TICKS(400));
-    if (audio_service_ != nullptr) {
-        audio_service_->EnableWakeWordDetection(false);
-        audio_service_->ReleaseWakeWordResources();
-    }
-    // 唤醒词刚释放时堆最干净，立刻预创建重采样器占住大块连续内存
-    // （mp3 常见 44100Hz；若流是其它采样率，解码时再重建）
-    if (!EnsureResampler(44100, codec->output_channels(), codec->output_sample_rate())) {
-        ESP_LOGW(TAG, "预创建重采样器失败，解码阶段会再次尝试");
-    }
-    ESP_LOGI(TAG, "内存水位: 空闲=%u 最大块=%u",
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
-
-    constexpr int kReadBufSize = 2048;
-    constexpr int kMaxZeroReads = 30;  // 连续空读约 3 秒视为流结束，容忍网络抖动
-    int out_buf_size = 8192;
-    bool decoder_registered = false;
+    // Opus 解码路径轻量（与 TTS 同款解码器），唤醒词引擎保持运行，
+    // 用户可随时语音唤醒打断音乐（状态切换时由监听器停止播放）
     bool playback_failed = false;
     bool playback_finished = false;
-    esp_audio_err_t ret = ESP_AUDIO_ERR_OK;
-    esp_audio_simple_dec_handle_t decoder = nullptr;
-    uint8_t* in_buf = nullptr;
-    uint8_t* out_buf = nullptr;
-    bool info_ready = false;
-    int stream_sample_rate = codec->output_sample_rate();
-    int stream_channels = std::max(1, codec->output_channels());
-    int zero_read_count = 0;
+    bool decoder_ready = false;
+    int decoder_sample_rate = 0;
+    void* opus_dec = nullptr;
+    std::vector<int16_t> pcm_buf(4800);  // 100ms@24k 单声道的余量
     size_t total_output_samples = 0;
 
+    OggDemuxer demuxer;
+    demuxer.OnPacket([&](const uint8_t* data, int sample_rate, int frame_duration_ms, size_t size) {
+        if (stop_requested_.load() || playback_failed) {
+            return;
+        }
+        // 首包到达时按流参数创建解码器（sample_rate 即解码输出采样率）
+        if (!decoder_ready || decoder_sample_rate != sample_rate) {
+            if (opus_dec != nullptr) {
+                esp_opus_dec_close(opus_dec);
+                opus_dec = nullptr;
+                decoder_ready = false;
+            }
+            esp_opus_dec_frame_duration_t frame_dur = ESP_OPUS_DEC_FRAME_DURATION_60_MS;
+            switch (frame_duration_ms) {
+                case 10:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_10_MS;  break;
+                case 20:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_20_MS;  break;
+                case 40:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_40_MS;  break;
+                case 80:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_80_MS;  break;
+                case 100: frame_dur = ESP_OPUS_DEC_FRAME_DURATION_100_MS; break;
+                default:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_60_MS;  break;
+            }
+            esp_opus_dec_cfg_t cfg = {
+                .sample_rate = static_cast<uint32_t>(sample_rate),
+                .channel = 1,
+                .frame_duration = frame_dur,
+                .self_delimited = false,
+            };
+            auto ret = esp_opus_dec_open(&cfg, sizeof(cfg), &opus_dec);
+            if (ret != ESP_AUDIO_ERR_OK || opus_dec == nullptr) {
+                ESP_LOGE(TAG, "Opus 解码器打开失败: %d", ret);
+                playback_failed = true;
+                return;
+            }
+            decoder_ready = true;
+            decoder_sample_rate = sample_rate;
+            ESP_LOGI(TAG, "Opus 解码器就绪: %dHz %dms 帧", sample_rate, frame_duration_ms);
+        }
+
+        esp_audio_dec_in_raw_t raw = {
+            .buffer = const_cast<uint8_t*>(data),
+            .len = static_cast<uint32_t>(size),
+            .consumed = 0,
+            .frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE,
+        };
+        esp_audio_dec_out_frame_t frame = {
+            .buffer = reinterpret_cast<uint8_t*>(pcm_buf.data()),
+            .len = static_cast<uint32_t>(pcm_buf.size() * sizeof(int16_t)),
+            .decoded_size = 0,
+        };
+        esp_audio_dec_info_t dec_info = {};
+        auto ret = esp_opus_dec_decode(opus_dec, &raw, &frame, &dec_info);
+        if (ret != ESP_AUDIO_ERR_OK) {
+            ESP_LOGW(TAG, "Opus 解码失败: %d", ret);
+            playback_failed = true;
+            return;
+        }
+        if (frame.decoded_size > 0) {
+            std::vector<int16_t> pcm(frame.decoded_size / sizeof(int16_t));
+            memcpy(pcm.data(), frame.buffer, frame.decoded_size);
+            if (!codec->output_enabled()) {
+                codec->EnableOutput(true);
+            }
+            codec->OutputData(pcm);
+            total_output_samples += pcm.size();
+        }
+    });
+
+    constexpr int kReadBufSize = 4096;
+    uint8_t* in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
     auto http = network->CreateHttp(3);
     do {
         http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
@@ -187,215 +192,42 @@ void MusicPlayer::Run(TaskArgs* args) {
                 opened_ok = true;
                 break;
             }
-            ESP_LOGW(TAG, "打开音频链接失败，%d ms 后重试", 800);
+            ESP_LOGW(TAG, "打开音乐流失败，800ms 后重试");
             vTaskDelay(pdMS_TO_TICKS(800));
         }
         if (!opened_ok) {
-            ESP_LOGE(TAG, "无法打开音频链接: %s", url.c_str());
-            playback_failed = true;
-            break;
-        }
-        if (http->GetStatusCode() != 200) {
-            ESP_LOGE(TAG, "音频链接返回状态码: %d", http->GetStatusCode());
-            playback_failed = true;
-            break;
-        }
-        ret = esp_audio_dec_register_default();
-        if (ret != ESP_AUDIO_ERR_OK) {
-            ESP_LOGE(TAG, "注册默认解码器失败: %d", ret);
-            playback_failed = true;
-            break;
-        }
-        ret = esp_audio_simple_dec_register_default();
-        if (ret != ESP_AUDIO_ERR_OK) {
-            ESP_LOGE(TAG, "注册简易解码器失败: %d", ret);
-            playback_failed = true;
-            break;
-        }
-        decoder_registered = true;
-        esp_audio_simple_dec_cfg_t dec_cfg = {
-            .dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3,
-            .dec_cfg = nullptr,
-            .cfg_size = 0,
-            .use_frame_dec = false,
-        };
-        ret = esp_audio_simple_dec_open(&dec_cfg, &decoder);
-        if (ret != ESP_AUDIO_ERR_OK || decoder == nullptr) {
-            ESP_LOGE(TAG, "打开 MP3 解码器失败: %d", ret);
-            playback_failed = true;
-            break;
-        }
-        if (!codec->output_enabled()) {
-            codec->EnableOutput(true);
-        }
-        in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
-        out_buf = static_cast<uint8_t*>(heap_caps_malloc(out_buf_size, MALLOC_CAP_8BIT));
-        if (in_buf == nullptr || out_buf == nullptr) {
-            ESP_LOGE(TAG, "内存不足，无法播放音乐");
+            ESP_LOGE(TAG, "无法打开音乐流: %s", url.c_str());
             playback_failed = true;
             break;
         }
 
-        while (!stop_requested_.load()) {
+        while (!stop_requested_.load() && !playback_failed) {
             auto read_res = http->Read(reinterpret_cast<char*>(in_buf), kReadBufSize);
             if (!read_res) {
-                ESP_LOGW(TAG, "读取音频流失败: %s", read_res.error().ToString().c_str());
+                ESP_LOGW(TAG, "读取音乐流失败: %s", read_res.error().ToString().c_str());
                 playback_failed = true;
                 break;
             }
             int read_bytes = read_res.value();
             if (read_bytes == 0) {
-                zero_read_count++;
-                if (zero_read_count >= kMaxZeroReads) {
-                    ESP_LOGI(TAG, "音频流读取结束（连续空读 %d 次）", zero_read_count);
-                    playback_finished = true;
-                    break;
-                }
-                vTaskDelay(pdMS_TO_TICKS(100));
-                continue;
-            }
-            zero_read_count = 0;
-
-            esp_audio_simple_dec_raw_t raw = {
-                .buffer = in_buf,
-                .len = static_cast<uint32_t>(read_bytes),
-                .eos = read_bytes < kReadBufSize,
-                .consumed = 0,
-                .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
-            };
-            while (raw.len > 0 && !stop_requested_.load()) {
-                esp_audio_simple_dec_out_t out = {
-                    .buffer = out_buf,
-                    .len = static_cast<uint32_t>(out_buf_size),
-                    .needed_size = 0,
-                    .decoded_size = 0,
-                };
-                ret = esp_audio_simple_dec_process(decoder, &raw, &out);
-                if (ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
-                    auto* new_buf = static_cast<uint8_t*>(
-                        heap_caps_realloc(out_buf, out.needed_size, MALLOC_CAP_8BIT));
-                    if (new_buf == nullptr) {
-                        ESP_LOGE(TAG, "扩容解码输出缓冲区失败");
-                        playback_failed = true;
-                        break;
-                    }
-                    out_buf = new_buf;
-                    out_buf_size = static_cast<int>(out.needed_size);
-                    continue;
-                }
-                if (ret != ESP_AUDIO_ERR_OK) {
-                    ESP_LOGW(TAG, "MP3 解码失败 ret=%d", ret);
-                    playback_failed = true;
-                    break;
-                }
-                if (raw.consumed == 0 && out.decoded_size == 0) {
-                    // 解码无进展，跳出避免死循环（数据损坏等场景）
-                    ESP_LOGW(TAG, "解码无进展，提前结束");
-                    break;
-                }
-                raw.buffer += raw.consumed;
-                raw.len -= raw.consumed;
-
-                if (out.decoded_size == 0) {
-                    continue;
-                }
-                if (!info_ready) {
-                    esp_audio_simple_dec_info_t dec_info = {};
-                    if (esp_audio_simple_dec_get_info(decoder, &dec_info) == ESP_AUDIO_ERR_OK) {
-                        stream_sample_rate = static_cast<int>(dec_info.sample_rate);
-                        stream_channels = std::max(1, static_cast<int>(dec_info.channel));
-                        info_ready = true;
-                        ESP_LOGI(TAG, "MP3 流信息: sample_rate=%d channel=%d",
-                                 stream_sample_rate, stream_channels);
-                    }
-                }
-
-                std::vector<int16_t> pcm(out.decoded_size / sizeof(int16_t));
-                memcpy(pcm.data(), out.buffer, out.decoded_size);
-
-                // 声道统一到 codec 输出声道
-                if (stream_channels == 2 && codec->output_channels() == 1) {
-                    std::vector<int16_t> mono(pcm.size() / 2);
-                    for (size_t i = 0, j = 0; i < mono.size(); ++i, j += 2) {
-                        mono[i] = static_cast<int16_t>(
-                            (static_cast<int32_t>(pcm[j]) + static_cast<int32_t>(pcm[j + 1])) / 2);
-                    }
-                    pcm = std::move(mono);
-                } else if (stream_channels == 1 && codec->output_channels() == 2) {
-                    std::vector<int16_t> stereo(pcm.size() * 2);
-                    for (size_t i = 0; i < pcm.size(); ++i) {
-                        stereo[i * 2] = pcm[i];
-                        stereo[i * 2 + 1] = pcm[i];
-                    }
-                    pcm = std::move(stereo);
-                }
-
-                // 采样率不一致时重采样，避免变速/变调
-                if (stream_sample_rate != codec->output_sample_rate()) {
-                    if (!EnsureResampler(stream_sample_rate, codec->output_channels(), codec->output_sample_rate())) {
-                        ESP_LOGE(TAG, "创建重采样器失败，无法播放该采样率的音频");
-                        playback_failed = true;
-                        break;
-                    }
-                    uint32_t in_samples = static_cast<uint32_t>(pcm.size() / codec->output_channels());
-                    uint32_t out_samples = 0;
-                    esp_ae_rate_cvt_get_max_out_sample_num(resampler_, in_samples, &out_samples);
-                    std::vector<int16_t> resampled(out_samples * codec->output_channels());
-                    uint32_t actual_out = out_samples;
-                    esp_ae_rate_cvt_process(resampler_,
-                                            reinterpret_cast<esp_ae_sample_t>(pcm.data()), in_samples,
-                                            reinterpret_cast<esp_ae_sample_t>(resampled.data()),
-                                            &actual_out);
-                    resampled.resize(actual_out * codec->output_channels());
-                    pcm = std::move(resampled);
-                }
-                    }
-                    uint32_t in_samples = static_cast<uint32_t>(pcm.size() / codec->output_channels());
-                    uint32_t out_samples = 0;
-                    esp_ae_rate_cvt_get_max_out_sample_num(resampler, in_samples, &out_samples);
-                    std::vector<int16_t> resampled(out_samples * codec->output_channels());
-                    uint32_t actual_out = out_samples;
-                    esp_ae_rate_cvt_process(resampler,
-                                            reinterpret_cast<esp_ae_sample_t>(pcm.data()), in_samples,
-                                            reinterpret_cast<esp_ae_sample_t>(resampled.data()),
-                                            &actual_out);
-                    resampled.resize(actual_out * codec->output_channels());
-                    pcm = std::move(resampled);
-                }
-
-                if (!pcm.empty()) {
-                    total_output_samples += pcm.size();
-                    // 音乐播放绕过 AudioService，需要手动保持功放开启
-                    if (!codec->output_enabled()) {
-                        codec->EnableOutput(true);
-                    }
-                    codec->OutputData(pcm);
-                }
-            }
-            if (playback_failed || stop_requested_.load()) {
+                ESP_LOGI(TAG, "音乐流读取结束");
+                playback_finished = true;
                 break;
             }
+            // 喂给 OGG 解封装器，回调内完成 Opus 解码与播放
+            size_t consumed = demuxer.Process(in_buf, read_bytes);
+            (void)consumed;
         }
     } while (false);
 
+    if (opus_dec != nullptr) {
+        esp_opus_dec_close(opus_dec);
+        opus_dec = nullptr;
+    }
     if (in_buf != nullptr) {
         heap_caps_free(in_buf);
     }
-    if (out_buf != nullptr) {
-        heap_caps_free(out_buf);
-    }
-    if (decoder != nullptr) {
-        esp_audio_simple_dec_close(decoder);
-    }
-    if (decoder_registered) {
-        esp_audio_simple_dec_unregister_default();
-        esp_audio_dec_unregister_default();
-    }
     http->Close();
-    if (audio_service_ != nullptr) {
-        audio_service_->SetExternalPlaybackActive(false);
-    }
-    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         playing_.store(false);
@@ -410,11 +242,5 @@ void MusicPlayer::Run(TaskArgs* args) {
         ESP_LOGW(TAG, "音乐播放失败");
     } else if (playback_finished) {
         ESP_LOGI(TAG, "音乐播放结束，输出 %u samples", static_cast<unsigned>(total_output_samples));
-    }
-
-    if (on_finished_) {
-        auto cb = std::move(on_finished_);
-        on_finished_ = nullptr;
-        cb();
     }
 }
