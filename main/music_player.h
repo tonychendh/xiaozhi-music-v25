@@ -8,13 +8,12 @@
 #include <functional>
 #include <mutex>
 #include <string>
-#include "esp_ae_rate_cvt.h"
 
 class AudioService;
 
-// 设备端音乐播放器：直接播放远程音频直链（MP3 流），经喇叭输出。
-// 播放管线：HTTP 流 -> esp_audio_codec 简易 MP3 解码 -> 声道/采样率转换 -> AudioCodec::OutputData
-// 播放期间通过 AudioService::SetExternalPlaybackActive 保持功放常开。
+// 设备端音乐播放器：拉取远程 OGG(Opus) 流，流式解码后经喇叭输出。
+// 管线：HTTP 流 -> OggDemuxer 解封装 -> esp_opus_dec 解码 -> AudioCodec::OutputData
+// 全程只用设备上被验证过的 Opus 解码路径（与 TTS 相同），无 MP3/TLS/重采样依赖。
 class MusicPlayer {
 public:
     MusicPlayer() = default;
@@ -22,8 +21,7 @@ public:
     MusicPlayer(const MusicPlayer&) = delete;
     MusicPlayer& operator=(const MusicPlayer&) = delete;
 
-    // 开始播放。返回 false 表示 URL 非法、任务创建失败或防重播拦截。
-    // on_finished 在播放任务结束时（自然播完/失败/被停止）回调一次。
+    // 开始播放。返回 false 表示 URL 非法或任务创建失败。
     bool Start(const std::string& url, const std::string& title, const std::string& artist,
                AudioService& audio_service, std::function<void()> on_finished = nullptr);
     // 停止播放并等待播放任务退出（在播放任务内调用时仅置位）
@@ -40,12 +38,6 @@ private:
     std::atomic<bool> stop_requested_{false};
     std::atomic<TaskHandle_t> task_handle_{nullptr};
     AudioService* audio_service_ = nullptr;
-    std::function<void()> on_finished_;
-    esp_ae_rate_cvt_handle_t resampler_ = nullptr;
-    int resampler_src_rate_ = 0;
-    std::string resampler_key_;  // src_rate+ch 组合，避免重复创建
-    bool EnsureResampler(int src_rate, int out_channels, int out_rate);
-    void DestroyResampler();
     mutable std::mutex mutex_;
     std::string last_url_;
     int64_t last_finished_ms_ = 0;
