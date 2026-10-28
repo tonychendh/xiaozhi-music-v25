@@ -108,51 +108,33 @@ void MusicPlayer::Run(TaskArgs* args) {
     // 用户可随时语音唤醒打断音乐（状态切换时由监听器停止播放）
     bool playback_failed = false;
     bool playback_finished = false;
-    bool decoder_ready = false;
-    int decoder_sample_rate = 0;
     void* opus_dec = nullptr;
     std::vector<int16_t> pcm_buf(4800);  // 100ms@24k 单声道的余量
     size_t total_output_samples = 0;
 
+    // 流参数完全由本机转码决定（24k 单声道 60ms 帧），解码器在连接 HTTP 之前
+    // 用固定参数创建一次，避免运行期碎片化导致创建失败
+    {
+        esp_opus_dec_cfg_t cfg = {
+            .sample_rate = 24000,
+            .channel = ESP_AUDIO_MONO,
+            .frame_duration = ESP_OPUS_DEC_FRAME_DURATION_60_MS,
+            .self_delimited = false,
+        };
+        auto ret = esp_opus_dec_open(&cfg, sizeof(cfg), &opus_dec);
+        ESP_LOGI(TAG, "解码器创建: ret=%d 空闲=%u 最大块=%u", ret,
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        if (ret != ESP_AUDIO_ERR_OK || opus_dec == nullptr) {
+            ESP_LOGE(TAG, "Opus 解码器打开失败: %d", ret);
+            playback_failed = true;
+        }
+    }
+
     OggDemuxer demuxer;
     demuxer.OnPacket([&](const uint8_t* data, int sample_rate, int frame_duration_ms, size_t size) {
-        if (stop_requested_.load() || playback_failed) {
+        if (stop_requested_.load() || playback_failed || opus_dec == nullptr) {
             return;
-        }
-        // 首包到达时按流参数创建解码器（sample_rate 即解码输出采样率）
-        if (!decoder_ready || decoder_sample_rate != sample_rate) {
-            if (opus_dec != nullptr) {
-                esp_opus_dec_close(opus_dec);
-                opus_dec = nullptr;
-                decoder_ready = false;
-            }
-            esp_opus_dec_frame_duration_t frame_dur = ESP_OPUS_DEC_FRAME_DURATION_60_MS;
-            switch (frame_duration_ms) {
-                case 10:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_10_MS;  break;
-                case 20:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_20_MS;  break;
-                case 40:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_40_MS;  break;
-                case 80:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_80_MS;  break;
-                case 100: frame_dur = ESP_OPUS_DEC_FRAME_DURATION_100_MS; break;
-                default:  frame_dur = ESP_OPUS_DEC_FRAME_DURATION_60_MS;  break;
-            }
-            esp_opus_dec_cfg_t cfg = {
-                // 关键：Opus 只支持 48/24/16/12/8k，忽略 OpusHead 记录的源采样率（如 44100），
-                // 与官方 TTS 解码一致，直接按 codec 输出率创建（内部自动重采样）
-                .sample_rate = static_cast<uint32_t>(codec->output_sample_rate()),
-                .channel = 1,
-                .frame_duration = frame_dur,
-                .self_delimited = false,
-            };
-            auto ret = esp_opus_dec_open(&cfg, sizeof(cfg), &opus_dec);
-            if (ret != ESP_AUDIO_ERR_OK || opus_dec == nullptr) {
-                ESP_LOGE(TAG, "Opus 解码器打开失败: %d", ret);
-                playback_failed = true;
-                return;
-            }
-            decoder_ready = true;
-            decoder_sample_rate = sample_rate;
-            ESP_LOGI(TAG, "Opus 解码器就绪: 输出%dHz（流标注%dHz %dms 帧）",
-                     codec->output_sample_rate(), sample_rate, frame_duration_ms);
         }
 
         esp_audio_dec_in_raw_t raw = {
@@ -188,6 +170,9 @@ void MusicPlayer::Run(TaskArgs* args) {
     uint8_t* in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
     auto http = network->CreateHttp(3);
     do {
+        if (playback_failed) {
+            break;  // 解码器都没建成，不必拉流
+        }
         http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
         bool opened_ok = false;
         for (int attempt = 0; attempt < 2 && !stop_requested_.load(); ++attempt) {
