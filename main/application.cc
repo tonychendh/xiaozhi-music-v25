@@ -786,6 +786,11 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
     if (url.empty()) {
         return false;
     }
+    // 报幕保护：等待"为您播放《...》"这类 TTS 播完再开始音乐（最多 6 秒），
+    // 否则关闭会话时会把播报语音一起掐断
+    for (int i = 0; i < 30 && GetDeviceState() == kDeviceStateSpeaking; i++) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
     // 播放音乐前先退出当前语音会话，避免服务端音频与本地音乐混播
     if (GetDeviceState() == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
