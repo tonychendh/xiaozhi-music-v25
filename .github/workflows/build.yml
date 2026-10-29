@@ -36,4 +36,11 @@ jobs:
           name: xiaozhi_${{ inputs.board }}_${{ github.sha }}.bin
           path: build/merged-binary.bin
           if-no-files-found: error
-# touch re-register
+
+      - name: Upload debug ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi_${{ inputs.board }}_${{ github.sha }}.elf
+          path: build/*.elf
+          if-no-files-found: error
+# touch re-register 2
