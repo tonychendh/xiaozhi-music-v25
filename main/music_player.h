@@ -11,9 +11,9 @@
 
 class AudioService;
 
-// 设备端音乐播放器：拉取远程 OGG(Opus) 流，流式解码后经喇叭输出。
-// 管线：HTTP 流 -> OggDemuxer 解封装 -> esp_opus_dec 解码 -> AudioCodec::OutputData
-// 全程只用设备上被验证过的 Opus 解码路径（与 TTS 相同），无 MP3/TLS/重采样依赖。
+// 设备端音乐播放器：拉取远程 OGG(Opus) 流并投递到 AudioService 解码队列。
+// 管线：HTTP 流 -> OggDemuxer 解封装 -> PushPacketToDecodeQueue（复用官方解码器，
+// 与提示音/通知音完全同路径），本文件不自建任何解码器实例。
 class MusicPlayer {
 public:
     MusicPlayer() = default;
