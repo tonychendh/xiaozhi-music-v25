@@ -1,17 +1,13 @@
 #include "music_player.h"
 
 #include "audio/audio_service.h"
-#include "audio_codec.h"
 #include "board.h"
+#include "protocols/protocol.h"
 #include "system_info.h"
 #include "audio/demuxer/ogg_demuxer.h"
-#include "esp_audio_dec_default.h"
-#include "esp_opus_dec.h"
 
-#include <algorithm>
 #include <cstring>
 #include <memory>
-#include <vector>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
@@ -36,6 +32,7 @@ std::string MusicPlayer::current_title() const {
 
 bool MusicPlayer::Start(const std::string& url, const std::string& title, const std::string& artist,
                         AudioService& audio_service, std::function<void()> on_finished) {
+    (void)on_finished;  // 新模式不释放唤醒词引擎，无需恢复回调
     if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
         ESP_LOGW(TAG, "无效的音乐链接: %s", url.c_str());
         return false;
@@ -97,81 +94,54 @@ void MusicPlayer::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
+// 播放管线：HTTP 拉 OGG 流 -> OggDemuxer 解出 Opus 包 -> 投递 AudioService
+// 解码队列（复用开机已创建的官方解码器，与提示音/通知音完全同路径）。
+// 本文件不自建任何解码器实例。
 void MusicPlayer::Run(TaskArgs* args) {
     const std::string& url = args->url;
     auto& board = Board::GetInstance();
-    auto codec = board.GetAudioCodec();
     auto network = board.GetNetwork();
-    ESP_LOGI(TAG, "开始播放音乐（Opus 流）: %s - %s", args->title.c_str(), args->artist.c_str());
+    ESP_LOGI(TAG, "开始播放音乐（解码队列模式）: %s - %s", args->title.c_str(), args->artist.c_str());
 
-    // Opus 解码路径轻量（与 TTS 同款解码器），唤醒词引擎保持运行，
-    // 用户可随时语音唤醒打断音乐（状态切换时由监听器停止播放）
     bool playback_failed = false;
     bool playback_finished = false;
-    void* opus_dec = nullptr;
-    std::vector<int16_t> pcm_buf(4800);  // 100ms@24k 单声道的余量
-    size_t total_output_samples = 0;
+    size_t total_packets = 0;
 
-    // 流参数完全由本机转码决定（24k 单声道 60ms 帧），解码器在连接 HTTP 之前
-    // 用固定参数创建一次，避免运行期碎片化导致创建失败
-    {
-        esp_opus_dec_cfg_t cfg = {
-            .sample_rate = 24000,
-            .channel = ESP_AUDIO_MONO,
-            .frame_duration = ESP_OPUS_DEC_FRAME_DURATION_60_MS,
-            .self_delimited = false,
-        };
-        auto ret = esp_opus_dec_open(&cfg, sizeof(cfg), &opus_dec);
-        ESP_LOGI(TAG, "解码器创建: ret=%d 空闲=%u 最大块=%u", ret,
-                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
-        if (ret != ESP_AUDIO_ERR_OK || opus_dec == nullptr) {
-            ESP_LOGE(TAG, "Opus 解码器打开失败: %d", ret);
-            playback_failed = true;
-        }
+    // 保持功放电源常开，避免长音频期间被省电逻辑关闭
+    if (audio_service_ != nullptr) {
+        audio_service_->SetExternalPlaybackActive(true);
     }
+    // HTTP 拉流期间关闭 WiFi 省电，避免下载卡顿
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
     OggDemuxer demuxer;
     demuxer.OnPacket([&](const uint8_t* data, int sample_rate, int frame_duration_ms, size_t size) {
-        if (stop_requested_.load() || playback_failed || opus_dec == nullptr) {
+        (void)sample_rate;
+        (void)frame_duration_ms;
+        if (stop_requested_.load() || playback_failed || audio_service_ == nullptr) {
             return;
         }
-
-        esp_audio_dec_in_raw_t raw = {
-            .buffer = const_cast<uint8_t*>(data),
-            .len = static_cast<uint32_t>(size),
-            .consumed = 0,
-            .frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE,
-        };
-        esp_audio_dec_out_frame_t frame = {
-            .buffer = reinterpret_cast<uint8_t*>(pcm_buf.data()),
-            .len = static_cast<uint32_t>(pcm_buf.size() * sizeof(int16_t)),
-            .decoded_size = 0,
-        };
-        esp_audio_dec_info_t dec_info = {};
-        auto ret = esp_opus_dec_decode(opus_dec, &raw, &frame, &dec_info);
-        if (ret != ESP_AUDIO_ERR_OK) {
-            ESP_LOGW(TAG, "Opus 解码失败: %d", ret);
+        auto packet = std::make_unique<AudioStreamPacket>();
+        // 流由本机转码生成，固定 24k 单声道 60ms，与设备解码器配置一致
+        packet->sample_rate = 24000;
+        packet->frame_duration = 60;
+        packet->payload.assign(data, data + size);
+        if (!audio_service_->PushPacketToDecodeQueue(std::move(packet), true)) {
+            ESP_LOGW(TAG, "解码队列投递失败（队列关闭或超时）");
             playback_failed = true;
             return;
         }
-        if (frame.decoded_size > 0) {
-            std::vector<int16_t> pcm(frame.decoded_size / sizeof(int16_t));
-            memcpy(pcm.data(), frame.buffer, frame.decoded_size);
-            if (!codec->output_enabled()) {
-                codec->EnableOutput(true);
-            }
-            codec->OutputData(pcm);
-            total_output_samples += pcm.size();
-        }
+        total_packets++;
     });
 
     constexpr int kReadBufSize = 4096;
     uint8_t* in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
     auto http = network->CreateHttp(3);
     do {
-        if (playback_failed) {
-            break;  // 解码器都没建成，不必拉流
+        if (in_buf == nullptr) {
+            ESP_LOGE(TAG, "内存不足");
+            playback_failed = true;
+            break;
         }
         http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
         bool opened_ok = false;
@@ -202,20 +172,18 @@ void MusicPlayer::Run(TaskArgs* args) {
                 playback_finished = true;
                 break;
             }
-            // 喂给 OGG 解封装器，回调内完成 Opus 解码与播放
-            size_t consumed = demuxer.Process(in_buf, read_bytes);
-            (void)consumed;
+            demuxer.Process(in_buf, read_bytes);
         }
     } while (false);
 
-    if (opus_dec != nullptr) {
-        esp_opus_dec_close(opus_dec);
-        opus_dec = nullptr;
-    }
+    http->Close();
     if (in_buf != nullptr) {
         heap_caps_free(in_buf);
     }
-    http->Close();
+    if (audio_service_ != nullptr) {
+        audio_service_->SetExternalPlaybackActive(false);
+    }
+    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         playing_.store(false);
@@ -225,10 +193,10 @@ void MusicPlayer::Run(TaskArgs* args) {
     }
 
     if (stop_requested_.load()) {
-        ESP_LOGI(TAG, "音乐播放已被停止");
+        ESP_LOGI(TAG, "音乐播放已被停止（已投递 %u 包）", static_cast<unsigned>(total_packets));
     } else if (playback_failed) {
         ESP_LOGW(TAG, "音乐播放失败");
     } else if (playback_finished) {
-        ESP_LOGI(TAG, "音乐播放结束，输出 %u samples", static_cast<unsigned>(total_output_samples));
+        ESP_LOGI(TAG, "音乐播放结束，共投递 %u 包", static_cast<unsigned>(total_packets));
     }
 }
