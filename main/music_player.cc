@@ -19,6 +19,7 @@ struct MusicPlayer::TaskArgs {
     std::string url;
     std::string title;
     std::string artist;
+    std::function<void()> on_finished;
 };
 
 MusicPlayer::~MusicPlayer() {
@@ -31,8 +32,7 @@ std::string MusicPlayer::current_title() const {
 }
 
 bool MusicPlayer::Start(const std::string& url, const std::string& title, const std::string& artist,
-                        AudioService& audio_service, std::function<void()> on_finished) {
-    (void)on_finished;  // 新模式不释放唤醒词引擎，无需恢复回调
+                         AudioService& audio_service, std::function<void()> on_finished) {
     if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
         ESP_LOGW(TAG, "无效的音乐链接: %s", url.c_str());
         return false;
@@ -60,7 +60,7 @@ bool MusicPlayer::Start(const std::string& url, const std::string& title, const 
     stop_requested_.store(false);
     playing_.store(true);
 
-    auto* args = new TaskArgs{this, url, title, artist};
+    auto* args = new TaskArgs{this, url, title, artist, std::move(on_finished)};
     TaskHandle_t handle = nullptr;
     if (xTaskCreate(&MusicPlayer::TaskEntry, "music_playback", 8192, args, 3, &handle) != pdPASS) {
         delete args;
@@ -113,6 +113,17 @@ void MusicPlayer::Run(TaskArgs* args) {
     }
     // HTTP 拉流期间关闭 WiFi 省电，避免下载卡顿
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
+    // C3 无 PSRAM，空闲内部 RAM 仅 ~57K，而播放管线（HTTP+解封装+解码/播放队列+任务栈）
+    // 稳态要吃 ~48K，叠加报幕 TTS / MQTT TLS 重连即内存耗尽（实测 alloc failed + abort 复位）。
+    // 照抄官方通知音路径（application.cc StartNotification）：播放期间临时释放唤醒词引擎
+    // 腾出 ~20K+；播放结束经 on_finished 回调恢复（Application 已负责 Schedule 回主循环）。
+    // 代价：音乐播放期间不支持语音唤醒打断，BOOT 键停止仍可用。
+    if (audio_service_ != nullptr) {
+        audio_service_->EnableVoiceProcessing(false);
+        audio_service_->EnableWakeWordDetection(false);
+        audio_service_->ReleaseWakeWordResources();
+    }
 
     OggDemuxer demuxer;
     demuxer.OnPacket([&](const uint8_t* data, int sample_rate, int frame_duration_ms, size_t size) {
@@ -198,5 +209,12 @@ void MusicPlayer::Run(TaskArgs* args) {
         ESP_LOGW(TAG, "音乐播放失败");
     } else if (playback_finished) {
         ESP_LOGI(TAG, "音乐播放结束，共投递 %u 包", static_cast<unsigned>(total_packets));
+    }
+
+    // 唤醒词引擎恢复的唯一收口点：正常播完/失败/被停止都会走到这里。
+    // 回调内部 Application::Schedule 回主循环判 idle 后 EnableWakeWordDetection(true)，
+    // 该路径会自动 RestoreWakeWordResources 重建 WakeNet。
+    if (args->on_finished) {
+        args->on_finished();
     }
 }
