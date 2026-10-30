@@ -786,16 +786,8 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
     if (url.empty()) {
         return false;
     }
-    // 报幕保护 v2（两阶段）：云端把 play_url 工具消息和播报 TTS 分两条流下发，
-    // 到达顺序不定。旧版只等"已在说"，工具先到时播报被掐死（字滚过没声音）。
-    // 阶段1：等播报"开始"最多 3s（没等到就认定本次无播报，直接播）；
-    // 阶段2：进入 speaking 后等它"说完"最多 10s，超时才强切。
-    for (int i = 0; i < 15 && GetDeviceState() != kDeviceStateSpeaking; i++) {
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-    for (int i = 0; i < 50 && GetDeviceState() == kDeviceStateSpeaking; i++) {
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
+    // 报幕已按用户要求移除（字幕滚动足够，起播更快）：不再等待播报 TTS，
+    // 若云端仍发来播报语音，直接随会话关闭一并掐断。
     // 播放音乐前先退出当前语音会话，避免服务端音频与本地音乐混播
     if (GetDeviceState() == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
