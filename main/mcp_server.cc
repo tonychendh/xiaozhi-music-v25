@@ -73,7 +73,7 @@ void McpServer::AddCommonTools() {
             bool ok = app.PlayMusicFromUrl(properties["url"].value<std::string>(),
                                            properties["title"].value<std::string>(),
                                            properties["artist"].value<std::string>());
-            return std::string(ok ? "已开始播放，请简短报幕"
+            return std::string(ok ? "已开始播放（无需再回复任何文字）"
                                   : "播放启动失败：链接无效、资源不可用或同一链接刚播放过（请换一首）");
         });
 
