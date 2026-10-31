@@ -106,6 +106,7 @@ void MusicPlayer::Run(TaskArgs* args) {
     bool playback_failed = false;
     bool playback_finished = false;
     size_t total_packets = 0;
+    int64_t t_first_us = 0;  // 首包投递时刻，生产者节流基准
 
     // 保持功放电源常开，避免长音频期间被省电逻辑关闭
     if (audio_service_ != nullptr) {
@@ -143,6 +144,20 @@ void MusicPlayer::Run(TaskArgs* args) {
             return;
         }
         total_packets++;
+        // 生产者节流：官方解码队列深 166 包（~55K 堆内存），局域网速度会瞬间灌满
+        // 并长期占住——这是长播放（15~20 分钟后）MQTT/TLS 重连等内存大户拿不到
+        // 内存、最终 abort 重启的主因。把领先量压到 ~33 包（2 秒音频），省出 ~45K；
+        // 若生产落后实时（网络抖动）节流自动停拍，领先量自愈回补。
+        const int64_t now_us = esp_timer_get_time();
+        if (t_first_us == 0) {
+            t_first_us = now_us;
+        } else if (total_packets > 33) {
+            const int64_t target_us =
+                t_first_us + (static_cast<int64_t>(total_packets) - 33) * 60000;
+            if (now_us < target_us) {
+                vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>((target_us - now_us) / 1000) + 1));
+            }
+        }
     });
 
     constexpr int kReadBufSize = 4096;
