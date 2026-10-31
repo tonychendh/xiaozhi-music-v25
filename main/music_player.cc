@@ -115,16 +115,8 @@ void MusicPlayer::Run(TaskArgs* args) {
     // HTTP 拉流期间关闭 WiFi 省电，避免下载卡顿
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
-    // C3 无 PSRAM，空闲内部 RAM 仅 ~57K，而播放管线（HTTP+解封装+解码/播放队列+任务栈）
-    // 稳态要吃 ~48K，叠加报幕 TTS / MQTT TLS 重连即内存耗尽（实测 alloc failed + abort 复位）。
-    // 照抄官方通知音路径（application.cc StartNotification）：播放期间临时释放唤醒词引擎
-    // 腾出 ~20K+；播放结束经 on_finished 回调恢复（Application 已负责 Schedule 回主循环）。
-    // 代价：音乐播放期间不支持语音唤醒打断，BOOT 键停止仍可用。
-    if (audio_service_ != nullptr) {
-        audio_service_->EnableVoiceProcessing(false);
-        audio_service_->EnableWakeWordDetection(false);
-        audio_service_->ReleaseWakeWordResources();
-    }
+    // 唤醒词引擎保持常驻不释放：内存由生产者节流保障（队列 166 包→33 包，省 ~45K），
+    // 销毁/重建 WakeNet 会拉低唤醒成功率（实测 2026-10-31）且丢掉语音打断能力，得不偿失。
 
     OggDemuxer demuxer;
     demuxer.OnPacket([&](const uint8_t* data, int sample_rate, int frame_duration_ms, size_t size) {
