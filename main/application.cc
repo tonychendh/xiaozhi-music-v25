@@ -1055,13 +1055,7 @@ void Application::HandleStateChangedEvent() {
                     "neutral");  // Then set emotion (wechat mode checks child count)
             }
             audio_service_.EnableVoiceProcessing(false);
-            // 音乐播放期间不重建唤醒词引擎：播放任务（music_player.Run）已把它释放掉
-            // 腾内存给长音频管线，这里无条件 enable 会在 ~100ms 内把 WakeNet 重建回来，
-            // 导致释放白做、内存仍被压穿而 abort 重启（实测 2026-10-30 瑜伽曲 83s 崩溃）。
-            // 播放结束后由 on_finished → Schedule 路径恢复。
-            if (!music_player_.IsPlaying()) {
-                audio_service_.EnableWakeWordDetection(true);
-            }
+            audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
