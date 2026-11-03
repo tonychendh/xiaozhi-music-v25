@@ -94,11 +94,55 @@ void MusicPlayer::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
+// 有声书自动连播：向桥接请求下一段 URL（GET <base>/novel_next）。
+// 返回空串表示不再连播（书读完/无进度/桥接未就绪）。
+static std::string FetchNextSegmentUrl(Network* network, const std::string& cur) {
+    if (network == nullptr) {
+        return "";
+    }
+    size_t s = cur.find("://");
+    if (s == std::string::npos) {
+        return "";
+    }
+    size_t p = cur.find('/', s + 3);
+    std::string base = (p == std::string::npos) ? cur : cur.substr(0, p);
+    auto http = network->CreateHttp(3);
+    if (http == nullptr) {
+        return "";
+    }
+    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+    if (!http->Open("GET", base + "/novel_next")) {
+        return "";
+    }
+    char buf[512];
+    int total = 0;
+    while (total < static_cast<int>(sizeof(buf)) - 1) {
+        auto r = http->Read(buf + total, sizeof(buf) - 1 - total);
+        if (!r || r.value() <= 0) {
+            break;
+        }
+        total += r.value();
+    }
+    http->Close();
+    std::string body(buf, total > 0 ? static_cast<size_t>(total) : 0);
+    size_t a = body.find_first_not_of(" \t\r\n");
+    size_t b = body.find_last_not_of(" \t\r\n");
+    if (a == std::string::npos) {
+        return "";
+    }
+    body = body.substr(a, b - a + 1);
+    if (body.rfind("http", 0) != 0) {
+        return "";
+    }
+    return body;
+}
+
 // 播放管线：HTTP 拉 OGG 流 -> OggDemuxer 解出 Opus 包 -> 投递 AudioService
 // 解码队列（复用开机已创建的官方解码器，与提示音/通知音完全同路径）。
 // 本文件不自建任何解码器实例。
+// 有声书片段（URL 含 /book_）自然播完后自动向桥接领取下一段连播；普通歌曲播完即停。
 void MusicPlayer::Run(TaskArgs* args) {
-    const std::string& url = args->url;
+    std::string url = args->url;
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
     ESP_LOGI(TAG, "开始播放音乐（解码队列模式）: %s - %s", args->title.c_str(), args->artist.c_str());
@@ -154,47 +198,69 @@ void MusicPlayer::Run(TaskArgs* args) {
 
     constexpr int kReadBufSize = 2048;
     uint8_t* in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
-    auto http = network->CreateHttp(3);
-    do {
-        if (in_buf == nullptr) {
-            ESP_LOGE(TAG, "内存不足");
-            playback_failed = true;
-            break;
-        }
-        http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-        bool opened_ok = false;
-        for (int attempt = 0; attempt < 2 && !stop_requested_.load(); ++attempt) {
-            if (auto opened = http->Open("GET", url); opened) {
-                opened_ok = true;
-                break;
-            }
-            ESP_LOGW(TAG, "打开音乐流失败，800ms 后重试");
-            vTaskDelay(pdMS_TO_TICKS(800));
-        }
-        if (!opened_ok) {
-            ESP_LOGE(TAG, "无法打开音乐流: %s", url.c_str());
-            playback_failed = true;
-            break;
-        }
-
-        while (!stop_requested_.load() && !playback_failed) {
-            auto read_res = http->Read(reinterpret_cast<char*>(in_buf), kReadBufSize);
-            if (!read_res) {
-                ESP_LOGW(TAG, "读取音乐流失败: %s", read_res.error().ToString().c_str());
+    for (;;) {
+        playback_failed = false;
+        playback_finished = false;
+        const bool is_book = url.find("/book_") != std::string::npos;
+        do {
+            if (in_buf == nullptr) {
+                ESP_LOGE(TAG, "内存不足");
                 playback_failed = true;
                 break;
             }
-            int read_bytes = read_res.value();
-            if (read_bytes == 0) {
-                ESP_LOGI(TAG, "音乐流读取结束");
-                playback_finished = true;
+            auto http = network->CreateHttp(3);
+            if (http == nullptr) {
+                ESP_LOGE(TAG, "HTTP 客户端创建失败");
+                playback_failed = true;
                 break;
             }
-            demuxer.Process(in_buf, read_bytes);
-        }
-    } while (false);
+            http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+            bool opened_ok = false;
+            for (int attempt = 0; attempt < 2 && !stop_requested_.load(); ++attempt) {
+                if (auto opened = http->Open("GET", url); opened) {
+                    opened_ok = true;
+                    break;
+                }
+                ESP_LOGW(TAG, "打开音乐流失败，800ms 后重试");
+                vTaskDelay(pdMS_TO_TICKS(800));
+            }
+            if (!opened_ok) {
+                ESP_LOGE(TAG, "无法打开音乐流: %s", url.c_str());
+                playback_failed = true;
+                break;
+            }
 
-    http->Close();
+            while (!stop_requested_.load() && !playback_failed) {
+                auto read_res = http->Read(reinterpret_cast<char*>(in_buf), kReadBufSize);
+                if (!read_res) {
+                    ESP_LOGW(TAG, "读取音乐流失败: %s", read_res.error().ToString().c_str());
+                    playback_failed = true;
+                    break;
+                }
+                int read_bytes = read_res.value();
+                if (read_bytes == 0) {
+                    ESP_LOGI(TAG, "音乐流读取结束");
+                    playback_finished = true;
+                    break;
+                }
+                demuxer.Process(in_buf, read_bytes);
+            }
+        } while (false);
+
+        // 有声书自动连播：仅"自然播完 + book_ 片段 + 未被停止"时领取下一段
+        if (!is_book || !playback_finished || stop_requested_.load()) {
+            break;
+        }
+        std::string next = FetchNextSegmentUrl(network, url);
+        if (next.empty()) {
+            ESP_LOGI(TAG, "有声书连播结束（无下一段）");
+            break;
+        }
+        ESP_LOGI(TAG, "有声书自动连播：切换下一段");
+        demuxer.Reset();
+        url = std::move(next);
+    }
+
     if (in_buf != nullptr) {
         heap_caps_free(in_buf);
     }
