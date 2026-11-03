@@ -95,8 +95,9 @@ void MusicPlayer::TaskEntry(void* arg) {
 }
 
 // 有声书自动连播：向桥接请求下一段 URL（GET <base>/novel_next）。
+// again=true 时请求重发当前段（网络抖动读坏后的自愈重试）。
 // 返回空串表示不再连播（书读完/无进度/桥接未就绪）。
-static std::string FetchNextSegmentUrl(NetworkInterface* network, const std::string& cur) {
+static std::string FetchNextSegmentUrl(NetworkInterface* network, const std::string& cur, bool again) {
     if (network == nullptr) {
         return "";
     }
@@ -106,12 +107,12 @@ static std::string FetchNextSegmentUrl(NetworkInterface* network, const std::str
     }
     size_t p = cur.find('/', s + 3);
     std::string base = (p == std::string::npos) ? cur : cur.substr(0, p);
-    auto http = network->CreateHttp(3);
+    auto http = network->CreateHttp(10);
     if (http == nullptr) {
         return "";
     }
     http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-    if (!http->Open("GET", base + "/novel_next")) {
+    if (!http->Open("GET", base + "/novel_next" + (again ? "?again=1" : ""))) {
         return "";
     }
     char buf[512];
@@ -198,6 +199,7 @@ void MusicPlayer::Run(TaskArgs* args) {
 
     constexpr int kReadBufSize = 2048;
     uint8_t* in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
+    int chain_retries = 0;  // 同一连播会话内"重发当前段"次数（防坏流死循环）
     for (;;) {
         playback_failed = false;
         playback_finished = false;
@@ -247,16 +249,30 @@ void MusicPlayer::Run(TaskArgs* args) {
             }
         } while (false);
 
-        // 有声书自动连播：仅"自然播完 + book_ 片段 + 未被停止"时领取下一段
-        if (!is_book || !playback_finished || stop_requested_.load()) {
+        // 有声书连播自愈：自然播完→取下一段；网络抖动读失败→重发当前段（最多 2 次）。
+        // 只有"被停止"或自愈失败才断链，普通歌曲不受影响。
+        if (!is_book || stop_requested_.load()) {
             break;
         }
-        std::string next = FetchNextSegmentUrl(network, url);
+        bool again = false;
+        if (!playback_finished) {
+            if (chain_retries >= 2) {
+                ESP_LOGW(TAG, "有声书连播：重试次数用尽，停止连播");
+                break;
+            }
+            chain_retries++;
+            again = true;
+            ESP_LOGW(TAG, "有声书连播：本段读取异常，重发当前段自愈（第%d次）", chain_retries);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        } else {
+            chain_retries = 0;
+        }
+        std::string next = FetchNextSegmentUrl(network, url, again);
         if (next.empty()) {
             ESP_LOGI(TAG, "有声书连播结束（无下一段）");
             break;
         }
-        ESP_LOGI(TAG, "有声书自动连播：切换下一段");
+        ESP_LOGI(TAG, "有声书自动连播：%s", again ? "重发当前段" : "切换下一段");
         demuxer.Reset();
         url = std::move(next);
     }
