@@ -96,7 +96,7 @@ void MusicPlayer::TaskEntry(void* arg) {
 
 // 有声书自动连播：向桥接请求下一段 URL（GET <base>/novel_next）。
 // 返回空串表示不再连播（书读完/无进度/桥接未就绪）。
-static std::string FetchNextSegmentUrl(Network* network, const std::string& cur) {
+static std::string FetchNextSegmentUrl(NetworkInterface* network, const std::string& cur) {
     if (network == nullptr) {
         return "";
     }
