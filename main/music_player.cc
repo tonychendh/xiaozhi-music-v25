@@ -168,8 +168,14 @@ static std::string FetchHttpText(NetworkInterface* network, const std::string& a
     return body;
 }
 
+// 字幕行：定长结构（桥接侧每行≤22汉字≈66字节UTF-8，留余量），逐行零堆分配
+struct SubLine {
+    int t_ms;
+    char text[70];
+};
+
 // 解析字幕时间轴 JSON: [{"t":起始毫秒,"s":"句子"}...]
-static void ParseSubtitles(const std::string& body, std::vector<std::pair<int, std::string>>& out) {
+static void ParseSubtitles(const std::string& body, std::vector<SubLine>& out) {
     if (body.empty()) {
         return;
     }
@@ -187,7 +193,11 @@ static void ParseSubtitles(const std::string& body, std::vector<std::pair<int, s
             cJSON* jt = cJSON_GetObjectItem(it, "t");
             cJSON* js = cJSON_GetObjectItem(it, "s");
             if (cJSON_IsNumber(jt) && cJSON_IsString(js) && js->valuestring != nullptr) {
-                out.emplace_back(static_cast<int>(jt->valuedouble), std::string(js->valuestring));
+                SubLine line{};
+                line.t_ms = static_cast<int>(jt->valuedouble);
+                strncpy(line.text, js->valuestring, sizeof(line.text) - 1);
+                line.text[sizeof(line.text) - 1] = '\0';
+                out.push_back(line);
             }
         }
     }
@@ -204,7 +214,7 @@ void MusicPlayer::Run(TaskArgs* args) {
     auto network = board.GetNetwork();
     auto display = board.GetDisplay();
     // 有声书屏幕字幕：[{起始毫秒, 句子}]，每段音频各自重置；拉不到字幕文件则静默降级
-    std::vector<std::pair<int, std::string>> subs;
+    std::vector<SubLine> subs;
     size_t sub_idx = 0;
     bool sub_shown = false;
     int64_t t_seg_us = 0;
@@ -222,10 +232,9 @@ void MusicPlayer::Run(TaskArgs* args) {
     // HTTP 拉流期间关闭 WiFi 省电，避免下载卡顿
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
-    // 唤醒词引擎策略：普通歌曲保持常驻（短会话内存够，唤醒体验完整）；
-    // 有声书连播会话（book_）在首段释放引擎腾出 ~20K+（长会话+字幕+TLS 重连的
-    // 内存刚需，实测不释放会 5.5K abort），整条链只释放一次，链尾由 on_finished 恢复。
-    bool engine_released = false;
+    // 唤醒词引擎保持常驻：曾尝试"有声书会话释放引擎"（实测 2026-11-04），
+    // 释放瞬间与音频通路/供电叠加导致 USB 掉线级联复位，风险大于收益，已回退。
+    // 内存改由字幕瘦身（定长结构+4K上限）与更紧的节流（6 包）保障。
 
     OggDemuxer demuxer;
     demuxer.OnPacket([&](const uint8_t* data, int sample_rate, int frame_duration_ms, size_t size) {
@@ -252,32 +261,32 @@ void MusicPlayer::Run(TaskArgs* args) {
         const int64_t now_us = esp_timer_get_time();
         if (t_first_us == 0) {
             t_first_us = now_us;
-        } else if (total_packets > 10) {
+        } else if (total_packets > 6) {
             const int64_t target_us =
-                t_first_us + (static_cast<int64_t>(total_packets) - 10) * 60000;
+                t_first_us + (static_cast<int64_t>(total_packets) - 6) * 60000;
             if (now_us < target_us) {
                 vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>((target_us - now_us) / 1000) + 1));
             }
         }
-        // 屏幕字幕同步：以本段首包为基准，扣除约 10 包（600ms）队列领先量
+        // 屏幕字幕同步：以本段首包为基准，扣除约 6 包（360ms）队列领先量
         if (!subs.empty()) {
             const int64_t tnow = esp_timer_get_time();
             if (t_seg_us == 0) {
                 t_seg_us = tnow;
             }
-            int64_t pos_ms = (tnow - t_seg_us) / 1000 - 600;
+            int64_t pos_ms = (tnow - t_seg_us) / 1000 - 360;
             if (pos_ms < 0) {
                 pos_ms = 0;
             }
             size_t ni = 0;
-            while (ni + 1 < subs.size() && subs[ni + 1].first <= pos_ms) {
+            while (ni + 1 < subs.size() && subs[ni + 1].t_ms <= pos_ms) {
                 ++ni;
             }
             if (!sub_shown || ni != sub_idx) {
                 sub_idx = ni;
                 sub_shown = true;
                 if (display != nullptr) {
-                    display->SetChatMessage("system", subs[ni].second.c_str());
+                    display->SetChatMessage("system", subs[ni].text);
                 }
             }
         }
@@ -327,20 +336,11 @@ void MusicPlayer::Run(TaskArgs* args) {
                 std::string surl = url;
                 if (surl.size() > 4 && surl.compare(surl.size() - 4, 4, ".ogg") == 0) {
                     surl.replace(surl.size() - 4, 4, ".json");
-                    ParseSubtitles(FetchHttpText(network, surl, 8192), subs);
+                    ParseSubtitles(FetchHttpText(network, surl, 4096), subs);
                     if (!subs.empty()) {
                         ESP_LOGI(TAG, "字幕已加载 %zu 句", subs.size());
                     }
                 }
-            }
-
-            // 有声书会话：首段起释放唤醒词引擎（整条连播链只释放一次）
-            if (is_book && !engine_released && audio_service_ != nullptr) {
-                audio_service_->EnableVoiceProcessing(false);
-                audio_service_->EnableWakeWordDetection(false);
-                audio_service_->ReleaseWakeWordResources();
-                engine_released = true;
-                ESP_LOGI(TAG, "有声书会话：唤醒词引擎已释放（腾出内存给长播放与字幕）");
             }
 
             while (!stop_requested_.load() && !playback_failed) {
