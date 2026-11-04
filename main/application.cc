@@ -806,6 +806,11 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
                 // （EnableWakeWordDetection 内部会自行判断有无唤醒词模型）
                 ESP_LOGI(TAG, "音乐结束，恢复唤醒词引擎");
                 audio_service_.EnableWakeWordDetection(true);
+                // 屏幕回到待命显示
+                auto display = Board::GetInstance().GetDisplay();
+                if (display != nullptr) {
+                    display->SetChatMessage("system", Lang::Strings::STANDBY);
+                }
             }
         });
     });
@@ -1053,9 +1058,16 @@ void Application::HandleStateChangedEvent() {
                 display->ClearChatMessages();  // Clear messages first
                 display->SetEmotion(
                     "neutral");  // Then set emotion (wechat mode checks child count)
+                // 用户定制：表情已停用，屏幕下方显示"待命"
+                display->SetChatMessage("system", Lang::Strings::STANDBY);
             }
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(true);
+            // 有声书连播会话中不重建唤醒词引擎：播放任务已释放它以腾 20K+ 内存，
+            // 这里若重建会把内存吃回去导致 abort（实测 2026-11-04 儒林外史 5.5K 崩溃）。
+            // 连播结束后由 on_finished 回调恢复。歌曲播放不受此闸门影响。
+            if (!music_player_.IsPlaying()) {
+                audio_service_.EnableWakeWordDetection(true);
+            }
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
