@@ -786,15 +786,16 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
     if (url.empty()) {
         return false;
     }
-    // 报幕已按用户要求移除（字幕滚动足够，起播更快）：不再等待播报 TTS，
-    // 若云端仍发来播报语音，直接随会话关闭一并掐断。
-    // 播放音乐前先退出当前语音会话，避免服务端音频与本地音乐混播
+    // 报幕已按用户要求移除（字幕滚动足够，起播更快）
     if (GetDeviceState() == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
     }
-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
-        protocol_->CloseAudioChannel();
-    }
+    // 重要（2026-11-04 崩溃根因分析）：**不再 CloseAudioChannel/发 goodbye**。
+    // 旧版关会话 → 云端回 goodbye → MQTT 整场播放反复 TLS 重连（每次需 ~40K），
+    // 在仅剩 ~14K 的播放期反复失败并碎片化堆 → 后续小分配抛 bad_alloc → abort
+    // （实测 19:26 儒林外史切换段时崩溃，符号化 __cxa_allocate_exception）。
+    // 会话保持打开则无重连风暴；服务端此轮已无后续音频（工具流程要求沉默），
+    // 若用户播放中唤醒/说话，状态监听会先 StopMusicPlayback，不会混播。
     SetDeviceState(kDeviceStateIdle);
     audio_service_.ResetDecoder();
     // 唤醒词引擎的释放/恢复由 MusicPlayer 播放任务内部处理
