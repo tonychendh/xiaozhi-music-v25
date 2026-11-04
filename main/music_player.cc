@@ -98,10 +98,9 @@ void MusicPlayer::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
-// 字幕特性开关：2026-11-04 二分定位中——疑似字幕拉取/解析引发堆损坏
-// （62K 空闲仍触发 bad_alloc abort）。关闭后其余连播/待命功能不受影响。
-// 定位确认后改回 true 并加固。
-constexpr bool kSubtitlesEnabled = false;
+// 字幕特性开关：2026-11-04 二分定位确认字幕路径引发堆损坏 abort（并发双 HTTP 客户端嫌疑最大）。
+// 加固版：字幕改为在打开音频流之前顺序拉取（同一时刻仅一个 HTTP 客户端），并加阶段日志。
+constexpr bool kSubtitlesEnabled = true;
 
 // 有声书自动连播：向桥接请求下一段 URL（GET <base>/novel_next）。
 // again=true 时请求重发当前段（网络抖动读坏后的自愈重试）。
@@ -314,6 +313,22 @@ void MusicPlayer::Run(TaskArgs* args) {
                 playback_failed = true;
                 break;
             }
+
+            // 加固：字幕先取（顺序执行，避免与音频流并发两个 HTTP 客户端——
+            // 这是 2026-11-04 崩溃二分定位出的头号嫌疑）
+            if (kSubtitlesEnabled && is_book && display != nullptr) {
+                std::string surl = url;
+                if (surl.size() > 4 && surl.compare(surl.size() - 4, 4, ".ogg") == 0) {
+                    surl.replace(surl.size() - 4, 4, ".json");
+                    std::string body = FetchHttpText(network, surl, 4096);
+                    ESP_LOGI(TAG, "字幕文件 %zu 字节", body.size());
+                    if (!body.empty()) {
+                        ParseSubtitles(body, subs);
+                    }
+                    ESP_LOGI(TAG, "字幕解析完成 %zu 句", subs.size());
+                }
+            }
+
             auto http = network->CreateHttp(3);
             if (http == nullptr) {
                 ESP_LOGE(TAG, "HTTP 客户端创建失败");
@@ -336,18 +351,6 @@ void MusicPlayer::Run(TaskArgs* args) {
                 break;
             }
 
-            // 有声书字幕：拉取与音频同名的 .json 时间轴（失败静默降级，不影响播放）
-            if (kSubtitlesEnabled && is_book && display != nullptr) {
-                std::string surl = url;
-                if (surl.size() > 4 && surl.compare(surl.size() - 4, 4, ".ogg") == 0) {
-                    surl.replace(surl.size() - 4, 4, ".json");
-                    ParseSubtitles(FetchHttpText(network, surl, 4096), subs);
-                    if (!subs.empty()) {
-                        ESP_LOGI(TAG, "字幕已加载 %zu 句", subs.size());
-                    }
-                }
-            }
-
             while (!stop_requested_.load() && !playback_failed) {
                 auto read_res = http->Read(reinterpret_cast<char*>(in_buf), kReadBufSize);
                 if (!read_res) {
@@ -363,6 +366,9 @@ void MusicPlayer::Run(TaskArgs* args) {
                 }
                 demuxer.Process(in_buf, read_bytes);
             }
+            ESP_LOGI(TAG, "会话结束: finished=%d failed=%d stop=%d",
+                     playback_finished ? 1 : 0, playback_failed ? 1 : 0,
+                     stop_requested_.load() ? 1 : 0);
         } while (false);
 
         // 有声书连播自愈：自然播完→取下一段；网络抖动读失败→重发当前段（最多 2 次）。
