@@ -148,6 +148,9 @@ static std::string FetchNextSegmentUrl(NetworkInterface* network, const std::str
 }
 
 // 小文本 GET 助手（字幕文件等），上限 cap 字节，失败返回空。
+// 关键修正（2026-11-04 栈回溯定罪）：必须等本请求 body 收完/超时才返回，
+// 否则客户端析构后其 ReceiveTask 线程仍在向已释放对象写数据（UAF），
+// 且与随后打开的音频流并发串扰、body 无限膨胀直至 new 失败 abort。
 static std::string FetchHttpText(NetworkInterface* network, const std::string& api, size_t cap) {
     if (network == nullptr) {
         return "";
@@ -162,14 +165,25 @@ static std::string FetchHttpText(NetworkInterface* network, const std::string& a
     }
     std::string body;
     char buf[512];
-    while (body.size() < cap) {
+    const int64_t deadline_us = esp_timer_get_time() + 15 * 1000 * 1000;  // 15s 封顶
+    while (body.size() < cap && esp_timer_get_time() < deadline_us) {
         auto r = http->Read(buf, sizeof(buf));
-        if (!r || r.value() <= 0) {
+        if (!r) {
             break;
+        }
+        if (r.value() == 0) {
+            break;  // 正常收完
+        }
+        if (r.value() < 0) {
+            vTaskDelay(pdMS_TO_TICKS(20));  // 暂无数据，稍等再试
+            continue;
         }
         body.append(buf, static_cast<size_t>(r.value()));
     }
-    http->Close();
+    http->Close();  // 显式关闭，确保接收线程退出后再析构
+    // 再给接收线程一点收尾时间：实测字幕客户端销毁后立刻开音频流，
+    // 两个EspTcp接收线程交叠窗口会造成堆损坏（new小对象即失败）
+    vTaskDelay(pdMS_TO_TICKS(300));
     return body;
 }
 
