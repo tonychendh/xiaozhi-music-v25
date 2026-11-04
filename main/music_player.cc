@@ -98,6 +98,11 @@ void MusicPlayer::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
+// 字幕特性开关：2026-11-04 二分定位中——疑似字幕拉取/解析引发堆损坏
+// （62K 空闲仍触发 bad_alloc abort）。关闭后其余连播/待命功能不受影响。
+// 定位确认后改回 true 并加固。
+constexpr bool kSubtitlesEnabled = false;
+
 // 有声书自动连播：向桥接请求下一段 URL（GET <base>/novel_next）。
 // again=true 时请求重发当前段（网络抖动读坏后的自愈重试）。
 // 返回空串表示不再连播（书读完/无进度/桥接未就绪）。
@@ -332,7 +337,7 @@ void MusicPlayer::Run(TaskArgs* args) {
             }
 
             // 有声书字幕：拉取与音频同名的 .json 时间轴（失败静默降级，不影响播放）
-            if (is_book && display != nullptr) {
+            if (kSubtitlesEnabled && is_book && display != nullptr) {
                 std::string surl = url;
                 if (surl.size() > 4 && surl.compare(surl.size() - 4, 4, ".ogg") == 0) {
                     surl.replace(surl.size() - 4, 4, ".json");
