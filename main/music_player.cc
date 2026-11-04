@@ -2,6 +2,7 @@
 
 #include "audio/audio_service.h"
 #include "board.h"
+#include "display/display.h"
 #include "protocols/protocol.h"
 #include "system_info.h"
 #include "audio/demuxer/ogg_demuxer.h"
