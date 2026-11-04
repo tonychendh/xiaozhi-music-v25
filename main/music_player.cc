@@ -1,5 +1,6 @@
 #include "music_player.h"
 
+#include "application.h"
 #include "audio/audio_service.h"
 #include "board.h"
 #include "display/display.h"
@@ -290,7 +291,16 @@ void MusicPlayer::Run(TaskArgs* args) {
                 sub_idx = ni;
                 sub_shown = true;
                 if (display != nullptr) {
-                    display->SetChatMessage("system", subs[ni].text);
+                    // 关键：LVGL 渲染调用链很深，绝不能在本任务（8K 栈，demuxer
+                    // 本地对象已占 ~3.5K）里直接调 SetChatMessage——实测栈溢出秒崩。
+                    // 按官方规则 Schedule 回主循环（大栈）执行。
+                    std::string line = subs[ni].text;
+                    Application::GetInstance().Schedule([line = std::move(line)]() {
+                        auto d = Board::GetInstance().GetDisplay();
+                        if (d != nullptr) {
+                            d->SetChatMessage("system", line.c_str());
+                        }
+                    });
                 }
             }
         }
