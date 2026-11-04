@@ -279,8 +279,12 @@ void OledDisplay::SetupUI_128x64() {
     lv_label_set_text(chat_message_label_, "");
     lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
-    lv_obj_set_width(chat_message_label_, width_ - 32);
-    lv_obj_set_style_pad_top(chat_message_label_, 14, 0);
+    // 用户定制：表情列已隐藏，文字全宽显示（一行约 10 个汉字）
+    lv_obj_set_width(chat_message_label_, width_ - 4);
+    lv_obj_set_style_pad_top(chat_message_label_, 10, 0);
+
+    // 用户定制：去掉左侧表情/笑脸列——屏幕只留状态文字与字幕，待命时仅显示"待命"
+    lv_obj_add_flag(content_left_, LV_OBJ_FLAG_HIDDEN);
 
     // Start scrolling subtitle after a delay
     static lv_anim_t a;
@@ -393,24 +397,8 @@ void OledDisplay::SetupUI_128x32() {
 }
 
 void OledDisplay::SetEmotion(const char* emotion) {
-    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-    const char* utf8 = noto_emoji_get_utf8(emotion);
-    const lv_font_t* emotion_font = lvgl_theme->emoji_font()->font();
-    if (utf8 == nullptr) {
-        utf8 = material_symbols_get_utf8(emotion);
-        emotion_font = lvgl_theme->large_icon_font()->font();
-    }
-    DisplayLockGuard lock(this);
-    if (emotion_label_ == nullptr) {
-        return;
-    }
-    if (utf8 != nullptr) {
-        lv_obj_set_style_text_font(emotion_label_, emotion_font, 0);
-        lv_label_set_text(emotion_label_, utf8);
-    } else {
-        lv_obj_set_style_text_font(emotion_label_, lvgl_theme->emoji_font()->font(), 0);
-        lv_label_set_text(emotion_label_, NOTO_EMOJI_NEUTRAL);
-    }
+    // 用户定制：表情显示全场景停用（表情列已隐藏），所有 SetEmotion 调用直接忽略。
+    (void)emotion;
 }
 
 void OledDisplay::SetTheme(Theme* theme) {
