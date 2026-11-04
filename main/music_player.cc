@@ -6,8 +6,11 @@
 #include "system_info.h"
 #include "audio/demuxer/ogg_demuxer.h"
 
+#include <cJSON.h>
 #include <cstring>
 #include <memory>
+#include <utility>
+#include <vector>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
@@ -138,6 +141,58 @@ static std::string FetchNextSegmentUrl(NetworkInterface* network, const std::str
     return body;
 }
 
+// 小文本 GET 助手（字幕文件等），上限 cap 字节，失败返回空。
+static std::string FetchHttpText(NetworkInterface* network, const std::string& api, size_t cap) {
+    if (network == nullptr) {
+        return "";
+    }
+    auto http = network->CreateHttp(10);
+    if (http == nullptr) {
+        return "";
+    }
+    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+    if (!http->Open("GET", api)) {
+        return "";
+    }
+    std::string body;
+    char buf[512];
+    while (body.size() < cap) {
+        auto r = http->Read(buf, sizeof(buf));
+        if (!r || r.value() <= 0) {
+            break;
+        }
+        body.append(buf, static_cast<size_t>(r.value()));
+    }
+    http->Close();
+    return body;
+}
+
+// 解析字幕时间轴 JSON: [{"t":起始毫秒,"s":"句子"}...]
+static void ParseSubtitles(const std::string& body, std::vector<std::pair<int, std::string>>& out) {
+    if (body.empty()) {
+        return;
+    }
+    cJSON* root = cJSON_Parse(body.c_str());
+    if (root == nullptr) {
+        return;
+    }
+    if (cJSON_IsArray(root)) {
+        int n = cJSON_GetArraySize(root);
+        for (int i = 0; i < n; ++i) {
+            cJSON* it = cJSON_GetArrayItem(root, i);
+            if (!cJSON_IsObject(it)) {
+                continue;
+            }
+            cJSON* jt = cJSON_GetObjectItem(it, "t");
+            cJSON* js = cJSON_GetObjectItem(it, "s");
+            if (cJSON_IsNumber(jt) && cJSON_IsString(js) && js->valuestring != nullptr) {
+                out.emplace_back(static_cast<int>(jt->valuedouble), std::string(js->valuestring));
+            }
+        }
+    }
+    cJSON_Delete(root);
+}
+
 // 播放管线：HTTP 拉 OGG 流 -> OggDemuxer 解出 Opus 包 -> 投递 AudioService
 // 解码队列（复用开机已创建的官方解码器，与提示音/通知音完全同路径）。
 // 本文件不自建任何解码器实例。
@@ -146,6 +201,12 @@ void MusicPlayer::Run(TaskArgs* args) {
     std::string url = args->url;
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
+    auto display = board.GetDisplay();
+    // 有声书屏幕字幕：[{起始毫秒, 句子}]，每段音频各自重置；拉不到字幕文件则静默降级
+    std::vector<std::pair<int, std::string>> subs;
+    size_t sub_idx = 0;
+    bool sub_shown = false;
+    int64_t t_seg_us = 0;
     ESP_LOGI(TAG, "开始播放音乐（解码队列模式）: %s - %s", args->title.c_str(), args->artist.c_str());
 
     bool playback_failed = false;
@@ -195,6 +256,28 @@ void MusicPlayer::Run(TaskArgs* args) {
                 vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>((target_us - now_us) / 1000) + 1));
             }
         }
+        // 屏幕字幕同步：以本段首包为基准，扣除约 10 包（600ms）队列领先量
+        if (!subs.empty()) {
+            const int64_t tnow = esp_timer_get_time();
+            if (t_seg_us == 0) {
+                t_seg_us = tnow;
+            }
+            int64_t pos_ms = (tnow - t_seg_us) / 1000 - 600;
+            if (pos_ms < 0) {
+                pos_ms = 0;
+            }
+            size_t ni = 0;
+            while (ni + 1 < subs.size() && subs[ni + 1].first <= pos_ms) {
+                ++ni;
+            }
+            if (!sub_shown || ni != sub_idx) {
+                sub_idx = ni;
+                sub_shown = true;
+                if (display != nullptr) {
+                    display->SetChatMessage("system", subs[ni].second.c_str());
+                }
+            }
+        }
     });
 
     constexpr int kReadBufSize = 2048;
@@ -204,6 +287,10 @@ void MusicPlayer::Run(TaskArgs* args) {
         playback_failed = false;
         playback_finished = false;
         const bool is_book = url.find("/book_") != std::string::npos;
+        subs.clear();
+        sub_idx = 0;
+        sub_shown = false;
+        t_seg_us = 0;
         do {
             if (in_buf == nullptr) {
                 ESP_LOGE(TAG, "内存不足");
@@ -230,6 +317,18 @@ void MusicPlayer::Run(TaskArgs* args) {
                 ESP_LOGE(TAG, "无法打开音乐流: %s", url.c_str());
                 playback_failed = true;
                 break;
+            }
+
+            // 有声书字幕：拉取与音频同名的 .json 时间轴（失败静默降级，不影响播放）
+            if (is_book && display != nullptr) {
+                std::string surl = url;
+                if (surl.size() > 4 && surl.compare(surl.size() - 4, 4, ".ogg") == 0) {
+                    surl.replace(surl.size() - 4, 4, ".json");
+                    ParseSubtitles(FetchHttpText(network, surl, 8192), subs);
+                    if (!subs.empty()) {
+                        ESP_LOGI(TAG, "字幕已加载 %zu 句", subs.size());
+                    }
+                }
             }
 
             while (!stop_requested_.load() && !playback_failed) {
