@@ -222,8 +222,10 @@ void MusicPlayer::Run(TaskArgs* args) {
     // HTTP 拉流期间关闭 WiFi 省电，避免下载卡顿
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
-    // 唤醒词引擎保持常驻不释放：内存由生产者节流保障（队列 166 包→33 包，省 ~45K），
-    // 销毁/重建 WakeNet 会拉低唤醒成功率（实测 2026-10-31）且丢掉语音打断能力，得不偿失。
+    // 唤醒词引擎策略：普通歌曲保持常驻（短会话内存够，唤醒体验完整）；
+    // 有声书连播会话（book_）在首段释放引擎腾出 ~20K+（长会话+字幕+TLS 重连的
+    // 内存刚需，实测不释放会 5.5K abort），整条链只释放一次，链尾由 on_finished 恢复。
+    bool engine_released = false;
 
     OggDemuxer demuxer;
     demuxer.OnPacket([&](const uint8_t* data, int sample_rate, int frame_duration_ms, size_t size) {
@@ -330,6 +332,15 @@ void MusicPlayer::Run(TaskArgs* args) {
                         ESP_LOGI(TAG, "字幕已加载 %zu 句", subs.size());
                     }
                 }
+            }
+
+            // 有声书会话：首段起释放唤醒词引擎（整条连播链只释放一次）
+            if (is_book && !engine_released && audio_service_ != nullptr) {
+                audio_service_->EnableVoiceProcessing(false);
+                audio_service_->EnableWakeWordDetection(false);
+                audio_service_->ReleaseWakeWordResources();
+                engine_released = true;
+                ESP_LOGI(TAG, "有声书会话：唤醒词引擎已释放（腾出内存给长播放与字幕）");
             }
 
             while (!stop_requested_.load() && !playback_failed) {
