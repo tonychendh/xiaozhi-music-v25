@@ -275,6 +275,7 @@ size_t OggDemuxer::Process(const uint8_t* data, size_t size)
                     if (!comment_routing_) {
                         comment_routing_ = true;
                         comment_.assign(reinterpret_cast<char*>(ctx_.packet_buf), ctx_.packet_len);
+                        ESP_LOGI(TAG, "注释包路由开始，已缓冲 %zu 字节", ctx_.packet_len);
                     }
                     size_t to_copy = std::min(size - processed, (size_t)seg_len);
                     if (comment_.size() < 8192) {
@@ -294,6 +295,7 @@ size_t OggDemuxer::Process(const uint8_t* data, size_t size)
                         comment_routing_ = false;
                         ctx_.packet_len = 0;
                         ctx_.packet_continued = false;
+                        ESP_LOGI(TAG, "注释包完整接收 %zu 字节", comment_.size());
                     }
                     ctx_.seg_index++;
                     continue;
