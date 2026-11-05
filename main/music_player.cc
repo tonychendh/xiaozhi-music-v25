@@ -99,13 +99,11 @@ void MusicPlayer::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
-// 字幕特性开关：2026-11-04 二分定位确认字幕路径引发堆损坏 abort（并发双 HTTP 客户端嫌疑最大）。
-// 加固版：字幕改为在打开音频流之前顺序拉取（同一时刻仅一个 HTTP 客户端），并加阶段日志。
-// 字幕特性开关：2026-11-05 永久关闭（物理边界，探针实测）：
-// HttpClient 预缓冲吃光播放期空闲堆（仅剩 5-6K），小说新汉字持续膨胀
-// LVGL 字形缓存，字幕上屏必踩内存悬崖（24K→6.9K→abort）。
-// 代码保留，供未来 PSRAM 板型启用；桥接侧同步停止嵌入 SUBS 元数据。
-constexpr bool kSubtitlesEnabled = false;
+// 轻字幕开关（2026-11-05 交接说明定稿）：
+// 歌词能滚是因为"一屏少字、内存只留当前句"；旧字幕崩在"整段时间轴常驻+整本字形"。
+// 本版按指针顺序 seek 字幕包（≤4K，随 OGG COMMENT 同流下发），每句 ≤8 字单屏，
+// 解析不建表、不拷贝整包，内存恒定一句话。异常时桥接侧 NOVEL_CAPTION=false 熄火。
+constexpr bool kSubtitlesEnabled = true;
 
 // 有声书自动连播：向桥接请求下一段 URL（GET <base>/novel_next）。
 // again=true 时请求重发当前段（网络抖动读坏后的自愈重试）。
@@ -155,107 +153,75 @@ static std::string FetchNextSegmentUrl(NetworkInterface* network, const std::str
 // 与音频同一条连接下发——彻底消灭"第二条 HTTP 客户端交叠"这个秒崩根因。
 // （曾经的 FetchHttpText 小文本助手因此退役。）
 
-// 字幕行：定长结构（桥接侧每行≤22汉字≈66字节UTF-8，留余量），逐行零堆分配
-struct SubLine {
-    int t_ms;
-    char text[70];
-};
-
-// 轻量字幕扫描器：直接解析 [{"t":N,"s":"..."},...]，不建中间树、不做字符串拷贝——
-// cJSON 解析树峰值 ~15K，会压垮播放期仅剩的 17K 空闲堆（探针实测 2026-11-05）。
-// 格式由桥接生成（compact separators、ensure_ascii=False、每行≤22字），解析器按此约定。
-static void ParseSubtitles(const std::string& raw, std::vector<SubLine>& out) {
-    size_t start = raw.find("SUBS=");
-    if (start == std::string::npos) {
-        return;
-    }
-    const char* p = raw.data() + start + 5;
-    const char* end = raw.data() + raw.size();
-    while (p < end) {
-        while (p < end && *p != '{') {
-            if (*p == ']') {
-                return;
-            }
-            ++p;
-        }
-        if (p >= end) {
-            break;
-        }
-        ++p;  // '{'
-        SubLine line{};
-        // "t":<digits>
-        while (p < end && *p != ':') {
-            ++p;
-        }
-        if (p >= end) {
-            break;
+// 轻字幕条目扫描器：从 [{"t":ms,"s":"≤8字"},...] 顺序读出一条，零分配零拷贝
+// （p 为游标，随播放进度单调前移；内存永远只有当前这一句）。
+static bool NextCaptionEntry(const char*& p, const char* end, int& t_ms, char* out, size_t out_cap) {
+    while (p < end && *p != '{') {
+        if (*p == ']') {
+            return false;
         }
         ++p;
-        int t = 0;
-        bool any = false;
-        while (p < end && *p >= '0' && *p <= '9') {
-            t = t * 10 + (*p - '0');
+    }
+    if (p >= end) {
+        return false;
+    }
+    ++p;  // '{'
+    while (p < end && *p != ':') {
+        ++p;
+    }
+    if (p >= end) {
+        return false;
+    }
+    ++p;
+    int t = 0;
+    bool any = false;
+    while (p < end && *p >= '0' && *p <= '9') {
+        t = t * 10 + (*p - '0');
+        ++p;
+        any = true;
+    }
+    if (!any) {
+        return false;
+    }
+    t_ms = t;
+    // 越过 "s" 键到字符串值开头：键开引号→键闭引号→值开引号
+    for (int q = 0; q < 3 && p < end; ++q) {
+        while (p < end && *p != '"') {
             ++p;
-            any = true;
         }
-        if (!any) {
+        if (p >= end) {
+            return false;
+        }
+        ++p;
+    }
+    size_t n = 0;
+    while (p < end) {
+        char c = *p++;
+        if (c == '"') {
             break;
         }
-        line.t_ms = t;
-        // 跳到 "s" 键的字符串值：'"'(键开) '"'(键闭) ':' '"'(值开)
-        for (int q = 0; q < 3 && p < end; ++q) {
-            while (p < end && *p != '"') {
-                ++p;
-            }
+        if (c == '\\') {
             if (p >= end) {
-                return;
+                break;
             }
-            ++p;
-        }
-        // 现在 p 指向字符串值内容第一个字节
-        size_t n = 0;
-        while (p < end) {
-            char c = *p++;
-            if (c == '"') {
-                break;  // 值结束
-            }
-            if (c == '\\') {
-                if (p >= end) {
-                    break;
-                }
-                char e = *p++;
-                if (e == 'u') {
-                    for (int i = 0; i < 4 && p < end; ++i) {
-                        ++p;
-                    }
-                    c = '?';
-                } else if (e == 'n') {
-                    c = '\n';
-                } else {
-                    c = e;  // \" \\ \/ 等直接取本体
-                }
-            }
-            if (n < sizeof(line.text) - 1) {
-                line.text[n++] = c;
-            } else {
-                while (p < end && *p != '"') {
+            char e = *p++;
+            if (e == 'u') {
+                for (int i = 0; i < 4 && p < end; ++i) {
                     ++p;
                 }
-                break;  // 超长截断
+                c = ' ';
+            } else if (e == 'n') {
+                c = ' ';
+            } else {
+                c = e;
             }
         }
-        line.text[n] = '\0';
-        if (line.text[0] != '\0') {
-            out.push_back(line);
-        }
-        // 找下一个条目或结尾
-        while (p < end && *p != '{' && *p != ']') {
-            ++p;
-        }
-        if (p >= end || *p == ']') {
-            break;
+        if (n + 1 < out_cap) {
+            out[n++] = c;
         }
     }
+    out[n] = '\0';
+    return n > 0;
 }
 
 // 播放管线：HTTP 拉 OGG 流 -> OggDemuxer 解出 Opus 包 -> 投递 AudioService
@@ -267,14 +233,14 @@ void MusicPlayer::Run(TaskArgs* args) {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
     auto display = board.GetDisplay();
-    // 有声书屏幕字幕：[{起始毫秒, 句子}]，每段音频各自重置；从 OGG COMMENT 头内嵌提取
-    // 有声书屏幕字幕（休眠中：kSubtitlesEnabled=false）
-    // 注意：不得在此处 reserve 大块——4.9K 连续分配在 TTS 会话后的碎片堆上
-    // 直接抛 bad_alloc abort（2026-11-05 探针定罪：崩于 Run 开头、连接建立前）
-    std::vector<SubLine> subs;
-    size_t sub_idx = 0;
-    bool sub_shown = false;
-    bool comment_parsed = false;
+    // 轻字幕状态：指针游标 + 当前句（全部栈上 <100B，零堆分配——
+    // 严禁在此申请大块：4.9K reserve 曾在 TTS 后碎片堆上直接 abort，2026-11-05 实测）
+    const char* cap_p = nullptr;
+    const char* cap_end = nullptr;
+    int cap_next_t = -1;
+    char cap_next_text[28] = {0};
+    bool cap_init = false;
+    bool cap_active = false;
     int64_t t_seg_us = 0;
     ESP_LOGI(TAG, "开始播放音乐（解码队列模式）: %s - %s", args->title.c_str(), args->artist.c_str());
 
@@ -326,45 +292,44 @@ void MusicPlayer::Run(TaskArgs* args) {
                 vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>((target_us - now_us) / 1000) + 1));
             }
         }
-        // 内嵌字幕提取：OpusTags 包（含 COMMENT=<json>）先于音频包到达，
-        // 由 demuxer 边解析边拼接，这里取成品——与音频同连接、零额外 HTTP
-        if (kSubtitlesEnabled && subs.empty() && !comment_parsed && demuxer.HasComment()) {
-            comment_parsed = true;
-            ParseSubtitles(demuxer.comment(), subs);
-            demuxer.ClearComment();  // 解析完立刻归还注释缓冲（~3.5K）
-            ESP_LOGI(TAG, "内嵌字幕解析完成 %zu 句 空闲堆=%u", subs.size(),
-                     (unsigned)esp_get_free_heap_size());
-        }
-        // 屏幕字幕同步：以本段首包为基准，扣除约 6 包（360ms）队列领先量
-        if (kSubtitlesEnabled && !subs.empty()) {
-            const int64_t tnow = esp_timer_get_time();
-            if (t_seg_us == 0) {
-                t_seg_us = tnow;
+        // 轻字幕（交接说明方案）：OpusTags 注释包（SUBS=<时间轴>）随音频同流到达，
+        // 指针按播放进度顺序 seek，内存只留当前一句；上屏 Schedule 回主循环执行。
+        if (kSubtitlesEnabled) {
+            if (!cap_init && demuxer.HasComment()) {
+                cap_init = true;
+                const std::string& raw = demuxer.comment();
+                size_t s = raw.find("SUBS=");
+                if (s != std::string::npos) {
+                    cap_p = raw.data() + s + 5;
+                    cap_end = raw.data() + raw.size();
+                    cap_active = NextCaptionEntry(cap_p, cap_end, cap_next_t,
+                                                  cap_next_text, sizeof(cap_next_text));
+                    ESP_LOGI(TAG, "轻字幕就绪 %zu 字节 空闲堆=%u", raw.size(),
+                             (unsigned)esp_get_free_heap_size());
+                }
             }
-            int64_t pos_ms = (tnow - t_seg_us) / 1000 - 360;
-            if (pos_ms < 0) {
-                pos_ms = 0;
-            }
-            size_t ni = 0;
-            while (ni + 1 < subs.size() && subs[ni + 1].t_ms <= pos_ms) {
-                ++ni;
-            }
-            if (!sub_shown || ni != sub_idx) {
-                sub_idx = ni;
-                sub_shown = true;
-                if (display != nullptr) {
-                    ESP_LOGI(TAG, "字幕显示 #%zu @%lldms 空闲堆=%u", ni,
-                             (long long)pos_ms, (unsigned)esp_get_free_heap_size());
-                    // 关键：LVGL 渲染调用链很深，绝不能在本任务（8K 栈，demuxer
-                    // 本地对象已占 ~3.5K）里直接调 SetChatMessage——实测栈溢出秒崩。
-                    // 按官方规则 Schedule 回主循环（大栈）执行。
-                    std::string line = subs[ni].text;
-                    Application::GetInstance().Schedule([line = std::move(line)]() {
-                        auto d = Board::GetInstance().GetDisplay();
-                        if (d != nullptr) {
-                            d->SetChatMessage("system", line.c_str());
-                        }
-                    });
+            if (cap_active) {
+                const int64_t tnow = esp_timer_get_time();
+                if (t_seg_us == 0) {
+                    t_seg_us = tnow;
+                }
+                int64_t pos_ms = (tnow - t_seg_us) / 1000 - 360;
+                if (pos_ms < 0) {
+                    pos_ms = 0;
+                }
+                while (cap_active && cap_next_t <= pos_ms) {
+                    char shown[28];
+                    memcpy(shown, cap_next_text, sizeof(shown));
+                    if (display != nullptr) {
+                        Application::GetInstance().Schedule([shown]() {
+                            auto d = Board::GetInstance().GetDisplay();
+                            if (d != nullptr) {
+                                d->SetChatMessage("system", shown);
+                            }
+                        });
+                    }
+                    cap_active = NextCaptionEntry(cap_p, cap_end, cap_next_t,
+                                                  cap_next_text, sizeof(cap_next_text));
                 }
             }
         }
@@ -377,10 +342,11 @@ void MusicPlayer::Run(TaskArgs* args) {
         playback_failed = false;
         playback_finished = false;
         const bool is_book = url.find("/book_") != std::string::npos;
-        subs.clear();
-        sub_idx = 0;
-        sub_shown = false;
-        comment_parsed = false;
+        cap_p = nullptr;
+        cap_end = nullptr;
+        cap_next_t = -1;
+        cap_init = false;
+        cap_active = false;
         t_seg_us = 0;
         do {
             if (in_buf == nullptr) {
