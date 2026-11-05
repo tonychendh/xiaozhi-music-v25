@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 #include <esp_log.h>
+#include <esp_system.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 
@@ -263,8 +264,9 @@ void MusicPlayer::Run(TaskArgs* args) {
                 size_t rb = js.rfind(']');
                 if (rb != std::string::npos) {
                     js.resize(rb + 1);  // JSON 以 ] 收尾，剔除其后可能存在的其它注释项
-                    ParseSubtitles(js, subs);
-                    ESP_LOGI(TAG, "内嵌字幕解析完成 %zu 句", subs.size());
+                ParseSubtitles(js, subs);
+                ESP_LOGI(TAG, "内嵌字幕解析完成 %zu 句 空闲堆=%u", subs.size(),
+                         (unsigned)esp_get_free_heap_size());
                 }
             }
         }
@@ -286,6 +288,8 @@ void MusicPlayer::Run(TaskArgs* args) {
                 sub_idx = ni;
                 sub_shown = true;
                 if (display != nullptr) {
+                    ESP_LOGI(TAG, "字幕显示 #%zu @%lldms 空闲堆=%u", ni,
+                             (long long)pos_ms, (unsigned)esp_get_free_heap_size());
                     // 关键：LVGL 渲染调用链很深，绝不能在本任务（8K 栈，demuxer
                     // 本地对象已占 ~3.5K）里直接调 SetChatMessage——实测栈溢出秒崩。
                     // 按官方规则 Schedule 回主循环（大栈）执行。
@@ -342,6 +346,7 @@ void MusicPlayer::Run(TaskArgs* args) {
                 break;
             }
 
+            unsigned loop_n = 0;
             while (!stop_requested_.load() && !playback_failed) {
                 auto read_res = http->Read(reinterpret_cast<char*>(in_buf), kReadBufSize);
                 if (!read_res) {
@@ -356,6 +361,10 @@ void MusicPlayer::Run(TaskArgs* args) {
                     break;
                 }
                 demuxer.Process(in_buf, read_bytes);
+                if (((++loop_n) & 31) == 0) {
+                    ESP_LOGI(TAG, "读循环#%u 空闲堆=%u", loop_n,
+                             (unsigned)esp_get_free_heap_size());
+                }
             }
             ESP_LOGI(TAG, "会话结束: finished=%d failed=%d stop=%d",
                      playback_finished ? 1 : 0, playback_failed ? 1 : 0,
