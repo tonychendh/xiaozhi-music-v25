@@ -8,7 +8,6 @@
 #include "system_info.h"
 #include "audio/demuxer/ogg_demuxer.h"
 
-#include <cJSON.h>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -158,34 +157,101 @@ struct SubLine {
     char text[70];
 };
 
-// 解析字幕时间轴 JSON: [{"t":起始毫秒,"s":"句子"}...]
-static void ParseSubtitles(const std::string& body, std::vector<SubLine>& out) {
-    if (body.empty()) {
+// 轻量字幕扫描器：直接解析 [{"t":N,"s":"..."},...]，不建中间树、不做字符串拷贝——
+// cJSON 解析树峰值 ~15K，会压垮播放期仅剩的 17K 空闲堆（探针实测 2026-11-05）。
+// 格式由桥接生成（compact separators、ensure_ascii=False、每行≤22字），解析器按此约定。
+static void ParseSubtitles(const std::string& raw, std::vector<SubLine>& out) {
+    size_t start = raw.find("SUBS=");
+    if (start == std::string::npos) {
         return;
     }
-    cJSON* root = cJSON_Parse(body.c_str());
-    if (root == nullptr) {
-        return;
-    }
-    if (cJSON_IsArray(root)) {
-        int n = cJSON_GetArraySize(root);
-        for (int i = 0; i < n; ++i) {
-            cJSON* it = cJSON_GetArrayItem(root, i);
-            if (!cJSON_IsObject(it)) {
-                continue;
+    const char* p = raw.data() + start + 5;
+    const char* end = raw.data() + raw.size();
+    while (p < end) {
+        while (p < end && *p != '{') {
+            if (*p == ']') {
+                return;
             }
-            cJSON* jt = cJSON_GetObjectItem(it, "t");
-            cJSON* js = cJSON_GetObjectItem(it, "s");
-            if (cJSON_IsNumber(jt) && cJSON_IsString(js) && js->valuestring != nullptr) {
-                SubLine line{};
-                line.t_ms = static_cast<int>(jt->valuedouble);
-                strncpy(line.text, js->valuestring, sizeof(line.text) - 1);
-                line.text[sizeof(line.text) - 1] = '\0';
-                out.push_back(line);
+            ++p;
+        }
+        if (p >= end) {
+            break;
+        }
+        ++p;  // '{'
+        SubLine line{};
+        // "t":<digits>
+        while (p < end && *p != ':') {
+            ++p;
+        }
+        if (p >= end) {
+            break;
+        }
+        ++p;
+        int t = 0;
+        bool any = false;
+        while (p < end && *p >= '0' && *p <= '9') {
+            t = t * 10 + (*p - '0');
+            ++p;
+            any = true;
+        }
+        if (!any) {
+            break;
+        }
+        line.t_ms = t;
+        // 跳到 "s" 键的字符串值：'"'(键开) '"'(键闭) ':' '"'(值开)
+        for (int q = 0; q < 3 && p < end; ++q) {
+            while (p < end && *p != '"') {
+                ++p;
+            }
+            if (p >= end) {
+                return;
+            }
+            ++p;
+        }
+        // 现在 p 指向字符串值内容第一个字节
+        size_t n = 0;
+        while (p < end) {
+            char c = *p++;
+            if (c == '"') {
+                break;  // 值结束
+            }
+            if (c == '\\') {
+                if (p >= end) {
+                    break;
+                }
+                char e = *p++;
+                if (e == 'u') {
+                    for (int i = 0; i < 4 && p < end; ++i) {
+                        ++p;
+                    }
+                    c = '?';
+                } else if (e == 'n') {
+                    c = '\n';
+                } else {
+                    c = e;  // \" \\ \/ 等直接取本体
+                }
+            }
+            if (n < sizeof(line.text) - 1) {
+                line.text[n++] = c;
+            } else {
+                while (p < end && *p != '"') {
+                    ++p;
+                }
+                break;  // 超长截断
             }
         }
+        line.text[n] = '\0';
+        if (line.text[0] != '\0') {
+            out.push_back(line);
+        }
+        // 找下一个条目或结尾
+        while (p < end && *p != '{' && *p != ']') {
+            ++p;
+        }
+        if (p >= end || *p == ']') {
+            break;
+        }
     }
-    cJSON_Delete(root);
 }
 
 // 播放管线：HTTP 拉 OGG 流 -> OggDemuxer 解出 Opus 包 -> 投递 AudioService
@@ -199,6 +265,9 @@ void MusicPlayer::Run(TaskArgs* args) {
     auto display = board.GetDisplay();
     // 有声书屏幕字幕：[{起始毫秒, 句子}]，每段音频各自重置；从 OGG COMMENT 头内嵌提取
     std::vector<SubLine> subs;
+    if (args->url.find("/book_") != std::string::npos) {
+        subs.reserve(64);  // 一次到位，避免增长期翻倍峰值
+    }
     size_t sub_idx = 0;
     bool sub_shown = false;
     bool comment_parsed = false;
@@ -257,17 +326,11 @@ void MusicPlayer::Run(TaskArgs* args) {
         // 由 demuxer 边解析边拼接，这里取成品——与音频同连接、零额外 HTTP
         if (kSubtitlesEnabled && subs.empty() && !comment_parsed && demuxer.HasComment()) {
             comment_parsed = true;
-            const std::string& raw = demuxer.comment();
-            size_t cpos = raw.find("SUBS=");
-            if (cpos != std::string::npos) {
-                std::string js = raw.substr(cpos + 5);
-                size_t rb = js.rfind(']');
-                if (rb != std::string::npos) {
-                    js.resize(rb + 1);  // JSON 以 ] 收尾，剔除其后可能存在的其它注释项
-                ParseSubtitles(js, subs);
-                ESP_LOGI(TAG, "内嵌字幕解析完成 %zu 句 空闲堆=%u", subs.size(),
-                         (unsigned)esp_get_free_heap_size());
-                }
+            ParseSubtitles(demuxer.comment(), subs);
+            demuxer.ClearComment();  // 解析完立刻归还注释缓冲（~3.5K）
+            ESP_LOGI(TAG, "内嵌字幕解析完成 %zu 句 空闲堆=%u", subs.size(),
+                     (unsigned)esp_get_free_heap_size());
+        }
             }
         }
         // 屏幕字幕同步：以本段首包为基准，扣除约 6 包（360ms）队列领先量
