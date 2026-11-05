@@ -147,45 +147,9 @@ static std::string FetchNextSegmentUrl(NetworkInterface* network, const std::str
     return body;
 }
 
-// 小文本 GET 助手（字幕文件等），上限 cap 字节，失败返回空。
-// 关键修正（2026-11-04 栈回溯定罪）：必须等本请求 body 收完/超时才返回，
-// 否则客户端析构后其 ReceiveTask 线程仍在向已释放对象写数据（UAF），
-// 且与随后打开的音频流并发串扰、body 无限膨胀直至 new 失败 abort。
-static std::string FetchHttpText(NetworkInterface* network, const std::string& api, size_t cap) {
-    if (network == nullptr) {
-        return "";
-    }
-    auto http = network->CreateHttp(10);
-    if (http == nullptr) {
-        return "";
-    }
-    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-    if (!http->Open("GET", api)) {
-        return "";
-    }
-    std::string body;
-    char buf[512];
-    const int64_t deadline_us = esp_timer_get_time() + 15 * 1000 * 1000;  // 15s 封顶
-    while (body.size() < cap && esp_timer_get_time() < deadline_us) {
-        auto r = http->Read(buf, sizeof(buf));
-        if (!r) {
-            break;
-        }
-        if (r.value() == 0) {
-            break;  // 正常收完
-        }
-        if (r.value() < 0) {
-            vTaskDelay(pdMS_TO_TICKS(20));  // 暂无数据，稍等再试
-            continue;
-        }
-        body.append(buf, static_cast<size_t>(r.value()));
-    }
-    http->Close();  // 显式关闭，确保接收线程退出后再析构
-    // 再给接收线程一点收尾时间：实测字幕客户端销毁后立刻开音频流，
-    // 两个EspTcp接收线程交叠窗口会造成堆损坏（new小对象即失败）
-    vTaskDelay(pdMS_TO_TICKS(300));
-    return body;
-}
+// 字幕承载方式（2026-11-04 定稿）：桥接把字幕 JSON 写进 OGG 的 COMMENT 元数据、
+// 与音频同一条连接下发——彻底消灭"第二条 HTTP 客户端交叠"这个秒崩根因。
+// （曾经的 FetchHttpText 小文本助手因此退役。）
 
 // 字幕行：定长结构（桥接侧每行≤22汉字≈66字节UTF-8，留余量），逐行零堆分配
 struct SubLine {
@@ -232,10 +196,11 @@ void MusicPlayer::Run(TaskArgs* args) {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
     auto display = board.GetDisplay();
-    // 有声书屏幕字幕：[{起始毫秒, 句子}]，每段音频各自重置；拉不到字幕文件则静默降级
+    // 有声书屏幕字幕：[{起始毫秒, 句子}]，每段音频各自重置；从 OGG COMMENT 头内嵌提取
     std::vector<SubLine> subs;
     size_t sub_idx = 0;
     bool sub_shown = false;
+    bool comment_parsed = false;
     int64_t t_seg_us = 0;
     ESP_LOGI(TAG, "开始播放音乐（解码队列模式）: %s - %s", args->title.c_str(), args->artist.c_str());
 
@@ -287,8 +252,24 @@ void MusicPlayer::Run(TaskArgs* args) {
                 vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>((target_us - now_us) / 1000) + 1));
             }
         }
+        // 内嵌字幕提取：OpusTags 包（含 COMMENT=<json>）先于音频包到达，
+        // 由 demuxer 边解析边拼接，这里取成品——与音频同连接、零额外 HTTP
+        if (kSubtitlesEnabled && subs.empty() && !comment_parsed && demuxer.HasComment()) {
+            comment_parsed = true;
+            const std::string& raw = demuxer.comment();
+            size_t cpos = raw.find("SUBS=");
+            if (cpos != std::string::npos) {
+                std::string js = raw.substr(cpos + 5);
+                size_t rb = js.rfind(']');
+                if (rb != std::string::npos) {
+                    js.resize(rb + 1);  // JSON 以 ] 收尾，剔除其后可能存在的其它注释项
+                    ParseSubtitles(js, subs);
+                    ESP_LOGI(TAG, "内嵌字幕解析完成 %zu 句", subs.size());
+                }
+            }
+        }
         // 屏幕字幕同步：以本段首包为基准，扣除约 6 包（360ms）队列领先量
-        if (!subs.empty()) {
+        if (kSubtitlesEnabled && !subs.empty()) {
             const int64_t tnow = esp_timer_get_time();
             if (t_seg_us == 0) {
                 t_seg_us = tnow;
@@ -330,27 +311,13 @@ void MusicPlayer::Run(TaskArgs* args) {
         subs.clear();
         sub_idx = 0;
         sub_shown = false;
+        comment_parsed = false;
         t_seg_us = 0;
         do {
             if (in_buf == nullptr) {
                 ESP_LOGE(TAG, "内存不足");
                 playback_failed = true;
                 break;
-            }
-
-            // 加固：字幕先取（顺序执行，避免与音频流并发两个 HTTP 客户端——
-            // 这是 2026-11-04 崩溃二分定位出的头号嫌疑）
-            if (kSubtitlesEnabled && is_book && display != nullptr) {
-                std::string surl = url;
-                if (surl.size() > 4 && surl.compare(surl.size() - 4, 4, ".ogg") == 0) {
-                    surl.replace(surl.size() - 4, 4, ".json");
-                    std::string body = FetchHttpText(network, surl, 4096);
-                    ESP_LOGI(TAG, "字幕文件 %zu 字节", body.size());
-                    if (!body.empty()) {
-                        ParseSubtitles(body, subs);
-                    }
-                    ESP_LOGI(TAG, "字幕解析完成 %zu 句", subs.size());
-                }
             }
 
             auto http = network->CreateHttp(3);
