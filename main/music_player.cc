@@ -99,11 +99,9 @@ void MusicPlayer::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
-// 轻字幕开关（2026-11-05 交接说明定稿）：
-// 歌词能滚是因为"一屏少字、内存只留当前句"；旧字幕崩在"整段时间轴常驻+整本字形"。
-// 本版按指针顺序 seek 字幕包（≤4K，随 OGG COMMENT 同流下发），每句 ≤8 字单屏，
-// 解析不建表、不拷贝整包，内存恒定一句话。异常时桥接侧 NOVEL_CAPTION=false 熄火。
-constexpr bool kSubtitlesEnabled = true;
+// 轻字幕开关：2026-11-05 二分实验——三次崩溃全部落在"字幕就绪"后 100ms 内
+// （包 2.4K/3.9K/1.7K/4.3K 都崩过，大小理论已死），关闭执行路径判定凶手。
+constexpr bool kSubtitlesEnabled = false;
 
 // 有声书自动连播：向桥接请求下一段 URL（GET <base>/novel_next）。
 // again=true 时请求重发当前段（网络抖动读坏后的自愈重试）。
@@ -319,7 +317,9 @@ void MusicPlayer::Run(TaskArgs* args) {
                 }
                 while (cap_active && cap_next_t <= pos_ms) {
                     char shown[48];
-                    memcpy(shown, cap_next_text, sizeof(shown));
+                    // 有界拷贝，绝不越界读（cap_next_text 可能未以 NUL 结尾的极端情况）
+                    strncpy(shown, cap_next_text, sizeof(shown) - 1);
+                    shown[sizeof(shown) - 1] = '\0';
                     if (display != nullptr) {
                         Application::GetInstance().Schedule([shown]() {
                             auto d = Board::GetInstance().GetDisplay();
