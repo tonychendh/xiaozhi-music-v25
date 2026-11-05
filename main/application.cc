@@ -790,11 +790,11 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
     if (GetDeviceState() == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
     }
-    // 播放音乐前退出语音会话（2026-11-05 回退"会话保活"实验：该改动与字幕残留分配
-    // 叠加后播放必崩，恢复至"基本可以"验证版行为）
-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
-        protocol_->CloseAudioChannel();
-    }
+    // 播放期间保持云端会话（2026-11-05 二次定案）：
+    // 关会话 → MQTT 断线 → 整场播放反复 TLS 重连（每次需 ~40K，播放期仅剩 15K）
+    // → 重试风暴 abort（瑜伽曲 15min、儒林外史 20min 皆此因，曲线已坐实）。
+    // 保活 = 回到正常待机的协议状态，不产生重连需求；若播放中用户说话，
+    // 状态监听（STATE_CHANGED → StopMusicPlayback）会先停乐，不存在混播。
     SetDeviceState(kDeviceStateIdle);
     audio_service_.ResetDecoder();
     // 唤醒词引擎的释放/恢复由 MusicPlayer 播放任务内部处理
