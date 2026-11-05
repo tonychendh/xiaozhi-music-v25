@@ -331,8 +331,6 @@ void MusicPlayer::Run(TaskArgs* args) {
             ESP_LOGI(TAG, "内嵌字幕解析完成 %zu 句 空闲堆=%u", subs.size(),
                      (unsigned)esp_get_free_heap_size());
         }
-            }
-        }
         // 屏幕字幕同步：以本段首包为基准，扣除约 6 包（360ms）队列领先量
         if (kSubtitlesEnabled && !subs.empty()) {
             const int64_t tnow = esp_timer_get_time();
