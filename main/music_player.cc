@@ -268,10 +268,10 @@ void MusicPlayer::Run(TaskArgs* args) {
     auto network = board.GetNetwork();
     auto display = board.GetDisplay();
     // 有声书屏幕字幕：[{起始毫秒, 句子}]，每段音频各自重置；从 OGG COMMENT 头内嵌提取
+    // 有声书屏幕字幕（休眠中：kSubtitlesEnabled=false）
+    // 注意：不得在此处 reserve 大块——4.9K 连续分配在 TTS 会话后的碎片堆上
+    // 直接抛 bad_alloc abort（2026-11-05 探针定罪：崩于 Run 开头、连接建立前）
     std::vector<SubLine> subs;
-    if (args->url.find("/book_") != std::string::npos) {
-        subs.reserve(64);  // 一次到位，避免增长期翻倍峰值
-    }
     size_t sub_idx = 0;
     bool sub_shown = false;
     bool comment_parsed = false;
