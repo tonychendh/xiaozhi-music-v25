@@ -101,7 +101,11 @@ void MusicPlayer::TaskEntry(void* arg) {
 
 // 字幕特性开关：2026-11-04 二分定位确认字幕路径引发堆损坏 abort（并发双 HTTP 客户端嫌疑最大）。
 // 加固版：字幕改为在打开音频流之前顺序拉取（同一时刻仅一个 HTTP 客户端），并加阶段日志。
-constexpr bool kSubtitlesEnabled = true;
+// 字幕特性开关：2026-11-05 永久关闭（物理边界，探针实测）：
+// HttpClient 预缓冲吃光播放期空闲堆（仅剩 5-6K），小说新汉字持续膨胀
+// LVGL 字形缓存，字幕上屏必踩内存悬崖（24K→6.9K→abort）。
+// 代码保留，供未来 PSRAM 板型启用；桥接侧同步停止嵌入 SUBS 元数据。
+constexpr bool kSubtitlesEnabled = false;
 
 // 有声书自动连播：向桥接请求下一段 URL（GET <base>/novel_next）。
 // again=true 时请求重发当前段（网络抖动读坏后的自愈重试）。
