@@ -267,39 +267,6 @@ size_t OggDemuxer::Process(const uint8_t* data, size_t size)
                 if (seg_len > 0 && processed == size) {
                     return processed;
                 }
-
-                // 字幕注释路由：当前包已识别为 OpusTags（前 8 字节在 packet_buf 中），
-                // 后续字节转入 comment_ 累积，避免大 COMMENT 撑爆 2048 的 packet_buf。
-                if (!opus_info_.tags_seen && ctx_.packet_len >= 8 &&
-                    memcmp(ctx_.packet_buf, "OpusTags", 8) == 0) {
-                    if (!comment_routing_) {
-                        comment_routing_ = true;
-                        comment_.assign(reinterpret_cast<char*>(ctx_.packet_buf), ctx_.packet_len);
-                        ESP_LOGI(TAG, "注释包路由开始，已缓冲 %zu 字节", ctx_.packet_len);
-                    }
-                    size_t to_copy = std::min(size - processed, (size_t)seg_len);
-                    if (comment_.size() < 8192) {
-                        comment_.append(reinterpret_cast<const char*>(data + processed), to_copy);
-                    }
-                    processed += to_copy;
-                    ctx_.packet_len += to_copy;
-                    ctx_.body_offset += to_copy;
-                    ctx_.seg_remaining -= to_copy;
-                    if (ctx_.seg_remaining > 0) {
-                        return processed;  // 段未完，等更多数据
-                    }
-                    if (ctx_.seg_table[ctx_.seg_index] != 255) {
-                        // tags 包完整收毕
-                        opus_info_.tags_seen = true;
-                        comment_ready_ = true;
-                        comment_routing_ = false;
-                        ctx_.packet_len = 0;
-                        ctx_.packet_continued = false;
-                        ESP_LOGI(TAG, "注释包完整接收 %zu 字节", comment_.size());
-                    }
-                    ctx_.seg_index++;
-                    continue;
-                }
                 
                 // Check that the packet buffer has enough space.
                 if (ctx_.packet_len + seg_len > sizeof(ctx_.packet_buf)) {
@@ -374,9 +341,6 @@ size_t OggDemuxer::Process(const uint8_t* data, size_t size)
                         if (!opus_info_.tags_seen) {
                             if (ctx_.packet_len >= 8 && memcmp(ctx_.packet_buf, "OpusTags", 8) == 0) {
                                 opus_info_.tags_seen = true;
-                                // 小包路径同样捕获注释（<2048 的 COMMENT）
-                                comment_.assign(reinterpret_cast<char*>(ctx_.packet_buf), ctx_.packet_len);
-                                comment_ready_ = true;
                                 ESP_LOGD(TAG, "OpusTags found.");
                                 ctx_.packet_len = 0;
                                 ctx_.packet_continued = false;
