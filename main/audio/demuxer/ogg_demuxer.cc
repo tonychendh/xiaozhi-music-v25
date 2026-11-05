@@ -277,7 +277,7 @@ size_t OggDemuxer::Process(const uint8_t* data, size_t size)
                         comment_.assign(reinterpret_cast<char*>(ctx_.packet_buf), ctx_.packet_len);
                     }
                     size_t to_copy = std::min(size - processed, (size_t)seg_len);
-                    if (comment_.size() < 4096) {
+                    if (comment_.size() < 4608) {
                         comment_.append(reinterpret_cast<const char*>(data + processed), to_copy);
                     }
                     processed += to_copy;
