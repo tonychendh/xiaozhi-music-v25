@@ -238,7 +238,7 @@ void MusicPlayer::Run(TaskArgs* args) {
     const char* cap_p = nullptr;
     const char* cap_end = nullptr;
     int cap_next_t = -1;
-    char cap_next_text[28] = {0};
+    char cap_next_text[48] = {0};
     bool cap_init = false;
     bool cap_active = false;
     int64_t t_seg_us = 0;
@@ -318,7 +318,7 @@ void MusicPlayer::Run(TaskArgs* args) {
                     pos_ms = 0;
                 }
                 while (cap_active && cap_next_t <= pos_ms) {
-                    char shown[28];
+                    char shown[48];
                     memcpy(shown, cap_next_text, sizeof(shown));
                     if (display != nullptr) {
                         Application::GetInstance().Schedule([shown]() {
