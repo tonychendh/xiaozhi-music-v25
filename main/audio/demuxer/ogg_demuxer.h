@@ -58,6 +58,11 @@ public:
     // HasComment() 为 true 时 comment() 含完整 OpusTags 包内容。
     bool HasComment() const { return comment_ready_; }
     const std::string& comment() const { return comment_; }
+    void ClearComment() {
+        comment_.clear();
+        comment_.shrink_to_fit();
+        comment_ready_ = false;
+    }
 
     void OnPacket(std::function<void(const uint8_t* data, int sample_rate, int frame_duration_ms,
                                      size_t len)> on_packet) {
