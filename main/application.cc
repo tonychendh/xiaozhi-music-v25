@@ -195,17 +195,9 @@ void Application::Run() {
             if (GetDeviceState() == kDeviceStateNotifying) {
                 StopNotification();
             }
-            // 播放期间静默网络/协议错误：Alert 的 TTS 提示音要在所剩无几的堆上
-            // 分配重采样缓冲，正是 abort 的最后一步（2026-11-06 实测 271s 崩溃链）。
-            // 只记日志，播完后一切照常。
-            if (music_player_.IsPlaying()) {
-                ESP_LOGW(TAG, "Music playing, suppress error alert: %s",
-                         last_error_message_.c_str());
-            } else {
-                SetDeviceState(kDeviceStateIdle);
-                Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
-                      Lang::Sounds::OGG_EXCLAMATION);
-            }
+            SetDeviceState(kDeviceStateIdle);
+            Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
+                  Lang::Sounds::OGG_EXCLAMATION);
         }
 
         if (bits & MAIN_EVENT_NETWORK_CONNECTED) {
