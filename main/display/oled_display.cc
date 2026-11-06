@@ -277,7 +277,7 @@ void OledDisplay::SetupUI_128x64() {
 
     chat_message_label_ = lv_label_create(content_right_);
     lv_label_set_text(chat_message_label_, "");
-    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL);  // 单次滚动:滚到句尾停住等下一句，不绕回句头（2026-11-06 用户实测循环滚动会把首字重复滚出）
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
     // 用户定制：表情列已隐藏，文字全宽显示（一行约 10 个汉字）
     lv_obj_set_width(chat_message_label_, width_ - 4);
@@ -383,7 +383,7 @@ void OledDisplay::SetupUI_128x32() {
     chat_message_label_ = lv_label_create(side_bar_);
     lv_obj_set_size(chat_message_label_, width_ - 32, LV_SIZE_CONTENT);
     lv_obj_set_style_pad_left(chat_message_label_, 2, 0);
-    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL);  // 单次滚动:滚到句尾停住等下一句，不绕回句头（2026-11-06 用户实测循环滚动会把首字重复滚出）
     lv_label_set_text(chat_message_label_, "");
 
     // Start scrolling subtitle after a delay
