@@ -627,6 +627,13 @@ void Application::InitializeProtocol() {
             }
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
+                    // 播放期间屏蔽云端主动 TTS（如会话被掐时发的"先到这里"告别语，
+                    // 2026-11-06 实测：tts start→切 speaking→停乐又在播放尾堆上分配
+                    // TTS 音频→bad_alloc 崩）。用户真要插话会先经唤醒停乐，不受影响。
+                    if (music_player_.IsPlaying()) {
+                        ESP_LOGW(TAG, "Music playing, ignore server TTS start");
+                        return;
+                    }
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });
