@@ -99,9 +99,10 @@ void MusicPlayer::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
-// 轻字幕开关：2026-11-05 二分实验——三次崩溃全部落在"字幕就绪"后 100ms 内
-// （包 2.4K/3.9K/1.7K/4.3K 都崩过，大小理论已死），关闭执行路径判定凶手。
-constexpr bool kSubtitlesEnabled = false;
+// 轻字幕开关：2026-11-06 复盘定案——"秒崩"真凶是崩溃后立刻重试时堆已碎片化，
+// 字幕显示路径的小额分配踩雷；根因(云端掐线重连风暴)已由 mqtt 重连闸门消除，
+// 风暴不再→不再碎片化重试，字幕恢复（12字/句末断行的稳定形态）。
+constexpr bool kSubtitlesEnabled = true;
 
 // 有声书自动连播：向桥接请求下一段 URL（GET <base>/novel_next）。
 // again=true 时请求重发当前段（网络抖动读坏后的自愈重试）。
