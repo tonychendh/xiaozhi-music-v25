@@ -157,15 +157,39 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     std::replace(content_str.begin(), content_str.end(), '\n', ' ');
 
     lv_anim_delete(chat_message_label_, nullptr);
-    if (content_right_ == nullptr) {
-        lv_label_set_text(chat_message_label_, content_str.c_str());
+    if (content_right_ != nullptr && (content == nullptr || content[0] == '\0')) {
+        lv_obj_add_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    lv_label_set_text(chat_message_label_, content_str.c_str());
+    if (content_right_ != nullptr) {
+        lv_obj_remove_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // 单次滚动定稿（2026-11-06 用户实测）：LVGL 内置 SCROLL_CIRCULAR 会绕回句头
+    // 重复滚首字，SCROLL 会来回滚——都不合要求。改为手动一次性平移动画：
+    // 句首静显 0.6s → 匀速平移到句尾 → 定格保持，直到下一句 SetChatMessage 重置。
+    lv_obj_update_layout(chat_message_label_);
+    const lv_font_t* font = lv_obj_get_style_text_font(chat_message_label_, LV_PART_MAIN);
+    int32_t letter_space = lv_obj_get_style_text_letter_space(chat_message_label_, LV_PART_MAIN);
+    int32_t text_w = lv_text_get_width(content_str.c_str(), font, letter_space);
+    int32_t vis_w = lv_obj_get_content_width(chat_message_label_);
+    int32_t overflow = text_w - vis_w;
+    if (overflow > 2) {
+        lv_obj_set_style_translate_x(chat_message_label_, 0, LV_PART_MAIN);
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, chat_message_label_);
+        lv_anim_set_exec_cb(&a, [](void* obj, int32_t v) {
+            lv_obj_set_style_translate_x((lv_obj_t*)obj, v, LV_PART_MAIN);
+        });
+        lv_anim_set_values(&a, 0, -overflow);
+        lv_anim_set_duration(&a, static_cast<uint32_t>(overflow * 40));  // ~25px/s
+        lv_anim_set_delay(&a, 600);
+        lv_anim_start(&a);
     } else {
-        if (content == nullptr || content[0] == '\0') {
-            lv_obj_add_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_label_set_text(chat_message_label_, content_str.c_str());
-            lv_obj_remove_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
-        }
+        lv_obj_set_style_translate_x(chat_message_label_, 0, LV_PART_MAIN);
     }
 }
 
@@ -277,7 +301,7 @@ void OledDisplay::SetupUI_128x64() {
 
     chat_message_label_ = lv_label_create(content_right_);
     lv_label_set_text(chat_message_label_, "");
-    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL);  // 单次滚动:滚到句尾停住等下一句，不绕回句头（2026-11-06 用户实测循环滚动会把首字重复滚出）
+    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_CLIP);  // 关闭内置滚动，句尾定格由 SetChatMessage 手动单次平移实现（2026-11-06）
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
     // 用户定制：表情列已隐藏，文字全宽显示（一行约 10 个汉字）
     lv_obj_set_width(chat_message_label_, width_ - 4);
@@ -383,7 +407,7 @@ void OledDisplay::SetupUI_128x32() {
     chat_message_label_ = lv_label_create(side_bar_);
     lv_obj_set_size(chat_message_label_, width_ - 32, LV_SIZE_CONTENT);
     lv_obj_set_style_pad_left(chat_message_label_, 2, 0);
-    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_SCROLL);  // 单次滚动:滚到句尾停住等下一句，不绕回句头（2026-11-06 用户实测循环滚动会把首字重复滚出）
+    lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_CLIP);  // 关闭内置滚动，句尾定格由 SetChatMessage 手动单次平移实现（2026-11-06）
     lv_label_set_text(chat_message_label_, "");
 
     // Start scrolling subtitle after a delay
