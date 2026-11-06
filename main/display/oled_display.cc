@@ -173,7 +173,9 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     lv_obj_update_layout(chat_message_label_);
     const lv_font_t* font = lv_obj_get_style_text_font(chat_message_label_, LV_PART_MAIN);
     int32_t letter_space = lv_obj_get_style_text_letter_space(chat_message_label_, LV_PART_MAIN);
-    int32_t text_w = lv_txt_get_width(content_str.c_str(), static_cast<uint32_t>(content_str.size()), font, letter_space);
+    lv_point_t text_sz;
+    lv_text_get_size(&text_sz, content_str.c_str(), font, letter_space, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int32_t text_w = text_sz.x;
     int32_t vis_w = lv_obj_get_content_width(chat_message_label_);
     int32_t overflow = text_w - vis_w;
     if (overflow > 2) {
