@@ -22,6 +22,14 @@ MqttProtocol::MqttProtocol() {
             [](void* arg) {
                 MqttProtocol* protocol = (MqttProtocol*)arg;
                 auto& app = Application::GetInstance();
+                if (app.IsMusicPlaying()) {
+                    // 播放期间挂起重连（2026-11-06 定案）：TLS 握手需 ~40K 连续堆，
+                    // 播放期只剩 10-20K，强行重连必然失败并引发碎片化风暴 → abort
+                    // （儒林外史 2 分钟三连崩根因）。15 秒后自重试，播完自然恢复。
+                    ESP_LOGI(TAG, "Music playing, defer MQTT reconnect (retry 15s)");
+                    esp_timer_start_once(protocol->reconnect_timer_, 15ULL * 1000000);
+                    return;
+                }
                 if (app.GetDeviceState() == kDeviceStateIdle) {
                     ESP_LOGI(TAG, "Reconnecting to MQTT server");
                     auto alive = protocol->alive_;  // Capture alive flag
