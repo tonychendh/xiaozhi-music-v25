@@ -173,6 +173,9 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     // 再平移标签让"文字右缘"贴到"屏幕右缘"。
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_set_size(chat_message_label_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    // 关键：先清零平移再量坐标——lv_obj_get_coords 含 translate，
+    // 上一句残留的平移会污染本句起点测量（2026-11-07 实测 x1 乱跳 -40~42）
+    lv_obj_set_style_translate_x(chat_message_label_, 0, LV_PART_MAIN);
     lv_obj_update_layout(chat_message_label_);
     const lv_font_t* font = lv_obj_get_style_text_font(chat_message_label_, LV_PART_MAIN);
     int32_t letter_space = lv_obj_get_style_text_letter_space(chat_message_label_, LV_PART_MAIN);
@@ -183,9 +186,9 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     int32_t scr_w = scr != nullptr ? lv_obj_get_width(scr) : 128;
     lv_area_t area;
     lv_obj_get_coords(chat_message_label_, &area);
-    int32_t start_t = -area.x1;                                   // 标签左缘精确落屏 x=0
-    int32_t right_after = area.x1 + text_w + start_t;            // = text_w
-    int32_t end_t = (scr_w - 2) - right_after;                   // 句尾贴屏右缘（负值）
+    int32_t start_t = -area.x1;                                   // 句头精确落屏幕 x=0
+    int32_t right_after = start_t + area.x1 + text_w;             // = text_w
+    int32_t end_t = (scr_w - 2) - right_after;                    // 句尾贴屏右缘
     if (end_t > start_t) {
         end_t = start_t;  // 短句放得下：定格在起点不滚
     }
