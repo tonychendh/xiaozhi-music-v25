@@ -178,17 +178,24 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     int32_t text_w = text_sz.x;
     // 标签与父容器都是自适应宽度（跟着内容撑），量它们等于量整句 → overflow 恒 0。
     // 终极解法：绝对坐标——标签在屏上的实际左缘到屏幕右缘的距离才是真可视宽度。
+    // 居中布局会让左缘为负（前几个字本来就在屏外），必须钳到 0 再算（2026-11-07 实测）。
     int32_t vis_w = lv_obj_get_content_width(chat_message_label_);
     lv_obj_t* scr = lv_obj_get_screen(chat_message_label_);
+    int32_t dbg_x1 = 0, dbg_scr_w = 0;
     if (scr != nullptr) {
         lv_area_t area;
         lv_obj_get_coords(chat_message_label_, &area);
-        int32_t avail = lv_obj_get_width(scr) - area.x1;
+        dbg_x1 = area.x1;
+        dbg_scr_w = lv_obj_get_width(scr);
+        int32_t left = area.x1 < 0 ? 0 : area.x1;
+        int32_t avail = dbg_scr_w - left;
         if (avail > 0 && avail < vis_w) {
             vis_w = avail;
         }
     }
     int32_t overflow = text_w - vis_w;
+    ESP_LOGI("OLED", "字幕滚动测量: bytes=%d text_w=%d x1=%d scr_w=%d vis_w=%d overflow=%d",
+             (int)content_str.size(), (int)text_w, (int)dbg_x1, (int)dbg_scr_w, (int)vis_w, (int)overflow);
     if (overflow > 2) {
         lv_obj_set_style_translate_x(chat_message_label_, 0, LV_PART_MAIN);
         lv_anim_t a;
