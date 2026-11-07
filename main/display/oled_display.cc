@@ -205,6 +205,16 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
         lv_anim_set_values(&a, start_t, end_t);
         lv_anim_set_duration(&a, static_cast<uint32_t>((start_t - end_t) * 30));  // ~33px/s（2026-11-07 调参：整段动画须落在单句~2s窗口内）
         lv_anim_set_delay(&a, 150);
+        // v7 终极探针：动画自然结束=滚到位；此日志缺失=被中途掐；坐标不足128=还有裁切层
+        lv_anim_set_completed_cb(&a, [](lv_anim_t* anim) {
+            lv_obj_t* lbl = static_cast<lv_obj_t*>(lv_anim_get_var(anim));
+            if (lbl == nullptr) {
+                return;
+            }
+            lv_area_t ar;
+            lv_obj_get_coords(lbl, &ar);
+            ESP_LOGI("OLED", "字幕滚动完成: x1=%d x2=%d", (int)ar.x1, (int)ar.x2);
+        });
         lv_anim_start(&a);
     } else {
         lv_obj_set_style_translate_x(chat_message_label_, start_t, LV_PART_MAIN);
@@ -312,6 +322,9 @@ void OledDisplay::SetupUI_128x64() {
 
     content_right_ = lv_obj_create(content_);
     lv_obj_set_size(content_right_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    // v7 探针前置：所有祖先容器放行溢出，文字只被屏幕物理边界裁（2026-11-07 排查尾部2-3字被裁）
+    lv_obj_add_flag(content_right_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_flag(content_, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_set_style_pad_all(content_right_, 0, 0);
     lv_obj_set_style_border_width(content_right_, 0, 0);
     lv_obj_set_flex_grow(content_right_, 1);
