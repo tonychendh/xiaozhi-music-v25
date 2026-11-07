@@ -167,11 +167,12 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
         lv_obj_remove_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // 单次滚动定稿 v3（2026-11-07 串口实测破案）：标签绝对左缘常为负（句头本来
-    // 就藏在屏幕左边外），旧版从 0 往负数滚 = 把开头越推越远、尾巴永远进不来。
-    // 正解：① 先把句头平移回屏幕左缘（start=-x1 if x1<0）
-    //       ② 句尾若仍超屏 → 一次性平移到"句尾贴右缘"后定格
-    //       ③ 静显 0.6s 再滚，约 25px/s，下一句 SetChatMessage 自动重置
+    // 滚动几何 v4（2026-11-07 布局源码定案）：原版标签是固定 96px 的裁剪窗口，
+    // 平移标签=移动窗口本身，文字永远从窗口右缘被裁死，滚多少都露不出句尾。
+    // 正解：强制标签=内容宽（窗口≥文字，裁切交给屏幕边缘），左对齐消除居中负起点，
+    // 再平移标签让"文字右缘"贴到"屏幕右缘"。
+    lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_size(chat_message_label_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_update_layout(chat_message_label_);
     const lv_font_t* font = lv_obj_get_style_text_font(chat_message_label_, LV_PART_MAIN);
     int32_t letter_space = lv_obj_get_style_text_letter_space(chat_message_label_, LV_PART_MAIN);
@@ -182,9 +183,12 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     int32_t scr_w = scr != nullptr ? lv_obj_get_width(scr) : 128;
     lv_area_t area;
     lv_obj_get_coords(chat_message_label_, &area);
-    int32_t start_t = area.x1 < 0 ? -area.x1 : 0;
-    int32_t x2_after = area.x1 + text_w + start_t;
-    int32_t end_t = (x2_after > scr_w - 2) ? start_t - (x2_after - (scr_w - 2)) : start_t;
+    int32_t start_t = -area.x1;                                   // 标签左缘精确落屏 x=0
+    int32_t right_after = area.x1 + text_w + start_t;            // = text_w
+    int32_t end_t = (scr_w - 2) - right_after;                   // 句尾贴屏右缘（负值）
+    if (end_t > start_t) {
+        end_t = start_t;  // 短句放得下：定格在起点不滚
+    }
     ESP_LOGI("OLED", "字幕滚动测量: bytes=%d text_w=%d x1=%d scr_w=%d start=%d end=%d",
              (int)content_str.size(), (int)text_w, (int)area.x1, (int)scr_w, (int)start_t, (int)end_t);
     if (end_t < start_t) {
