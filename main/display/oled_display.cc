@@ -203,8 +203,8 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
             lv_obj_set_style_translate_x((lv_obj_t*)obj, v, LV_PART_MAIN);
         });
         lv_anim_set_values(&a, start_t, end_t);
-        lv_anim_set_duration(&a, static_cast<uint32_t>((start_t - end_t) * 40));  // ~25px/s
-        lv_anim_set_delay(&a, 600);
+        lv_anim_set_duration(&a, static_cast<uint32_t>((start_t - end_t) * 30));  // ~33px/s（2026-11-07 调参：整段动画须落在单句~2s窗口内）
+        lv_anim_set_delay(&a, 150);
         lv_anim_start(&a);
     } else {
         lv_obj_set_style_translate_x(chat_message_label_, start_t, LV_PART_MAIN);
