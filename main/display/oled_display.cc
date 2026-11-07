@@ -188,7 +188,7 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     lv_obj_get_coords(chat_message_label_, &area);
     int32_t start_t = -area.x1;                                   // 句头精确落屏幕 x=0
     int32_t right_after = start_t + area.x1 + text_w;             // = text_w
-    int32_t end_t = (scr_w - 2) - right_after;                    // 句尾贴屏右缘
+    int32_t end_t = (scr_w - 18) - right_after;                   // 句尾留一个字宽余量定格（2026-11-07 实测贴边时末字被物理边界裁掉）
     if (end_t > start_t) {
         end_t = start_t;  // 短句放得下：定格在起点不滚
     }
