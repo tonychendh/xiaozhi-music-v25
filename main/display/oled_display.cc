@@ -167,49 +167,40 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
         lv_obj_remove_flag(content_right_, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // 单次滚动定稿（2026-11-06 用户实测）：LVGL 内置 SCROLL_CIRCULAR 会绕回句头
-    // 重复滚首字，SCROLL 会来回滚——都不合要求。改为手动一次性平移动画：
-    // 句首静显 0.6s → 匀速平移到句尾 → 定格保持，直到下一句 SetChatMessage 重置。
+    // 单次滚动定稿 v3（2026-11-07 串口实测破案）：标签绝对左缘常为负（句头本来
+    // 就藏在屏幕左边外），旧版从 0 往负数滚 = 把开头越推越远、尾巴永远进不来。
+    // 正解：① 先把句头平移回屏幕左缘（start=-x1 if x1<0）
+    //       ② 句尾若仍超屏 → 一次性平移到"句尾贴右缘"后定格
+    //       ③ 静显 0.6s 再滚，约 25px/s，下一句 SetChatMessage 自动重置
     lv_obj_update_layout(chat_message_label_);
     const lv_font_t* font = lv_obj_get_style_text_font(chat_message_label_, LV_PART_MAIN);
     int32_t letter_space = lv_obj_get_style_text_letter_space(chat_message_label_, LV_PART_MAIN);
     lv_point_t text_sz;
     lv_text_get_size(&text_sz, content_str.c_str(), font, letter_space, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     int32_t text_w = text_sz.x;
-    // 标签与父容器都是自适应宽度（跟着内容撑），量它们等于量整句 → overflow 恒 0。
-    // 终极解法：绝对坐标——标签在屏上的实际左缘到屏幕右缘的距离才是真可视宽度。
-    // 居中布局会让左缘为负（前几个字本来就在屏外），必须钳到 0 再算（2026-11-07 实测）。
-    int32_t vis_w = lv_obj_get_content_width(chat_message_label_);
     lv_obj_t* scr = lv_obj_get_screen(chat_message_label_);
-    int32_t dbg_x1 = 0, dbg_scr_w = 0;
-    if (scr != nullptr) {
-        lv_area_t area;
-        lv_obj_get_coords(chat_message_label_, &area);
-        dbg_x1 = area.x1;
-        dbg_scr_w = lv_obj_get_width(scr);
-        int32_t left = area.x1 < 0 ? 0 : area.x1;
-        int32_t avail = dbg_scr_w - left;
-        if (avail > 0 && avail < vis_w) {
-            vis_w = avail;
-        }
-    }
-    int32_t overflow = text_w - vis_w;
-    ESP_LOGI("OLED", "字幕滚动测量: bytes=%d text_w=%d x1=%d scr_w=%d vis_w=%d overflow=%d",
-             (int)content_str.size(), (int)text_w, (int)dbg_x1, (int)dbg_scr_w, (int)vis_w, (int)overflow);
-    if (overflow > 2) {
-        lv_obj_set_style_translate_x(chat_message_label_, 0, LV_PART_MAIN);
+    int32_t scr_w = scr != nullptr ? lv_obj_get_width(scr) : 128;
+    lv_area_t area;
+    lv_obj_get_coords(chat_message_label_, &area);
+    int32_t start_t = area.x1 < 0 ? -area.x1 : 0;
+    int32_t x2_after = area.x1 + text_w + start_t;
+    int32_t end_t = (x2_after > scr_w - 2) ? start_t - (x2_after - (scr_w - 2)) : start_t;
+    ESP_LOGI("OLED", "字幕滚动测量: bytes=%d text_w=%d x1=%d scr_w=%d start=%d end=%d",
+             (int)content_str.size(), (int)text_w, (int)area.x1, (int)scr_w, (int)start_t, (int)end_t);
+    if (end_t < start_t) {
+        lv_obj_set_style_translate_x(chat_message_label_, start_t, LV_PART_MAIN);
         lv_anim_t a;
         lv_anim_init(&a);
         lv_anim_set_var(&a, chat_message_label_);
         lv_anim_set_exec_cb(&a, [](void* obj, int32_t v) {
             lv_obj_set_style_translate_x((lv_obj_t*)obj, v, LV_PART_MAIN);
         });
-        lv_anim_set_values(&a, 0, -overflow);
-        lv_anim_set_duration(&a, static_cast<uint32_t>(overflow * 40));  // ~25px/s
+        lv_anim_set_values(&a, start_t, end_t);
+        lv_anim_set_duration(&a, static_cast<uint32_t>((start_t - end_t) * 40));  // ~25px/s
         lv_anim_set_delay(&a, 600);
         lv_anim_start(&a);
     } else {
-        lv_obj_set_style_translate_x(chat_message_label_, 0, LV_PART_MAIN);
+        lv_obj_set_style_translate_x(chat_message_label_, start_t, LV_PART_MAIN);
     }
 }
 
