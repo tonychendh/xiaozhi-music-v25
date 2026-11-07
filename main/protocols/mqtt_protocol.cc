@@ -27,6 +27,14 @@ MqttProtocol::MqttProtocol() {
                     // 播放期只剩 10-20K，强行重连必然失败并引发碎片化风暴 → abort
                     // （儒林外史 2 分钟三连崩根因）。15 秒后自重试，播完自然恢复。
                     ESP_LOGI(TAG, "Music playing, defer MQTT reconnect (retry 15s)");
+                    // esp_mqtt 库自带自动重连循环，每 ~25s 偷发一次 TLS 尝试（select
+                    // 超时 10s），堆被撕到 6-10K 震荡 → ReceiveTask bad_alloc。
+                    // Disconnect()=client_stop+destroy 彻底掐停库级重试；
+                    // 播完后下一个 15s tick 走正常分支 StartMqttClient 重建。
+                    // （2026-11-07 复盘：当日云端频繁掐线，无此补丁即崩，恢复启用）
+                    if (protocol->mqtt_ != nullptr) {
+                        protocol->mqtt_->Disconnect();
+                    }
                     esp_timer_start_once(protocol->reconnect_timer_, 15ULL * 1000000);
                     return;
                 }
