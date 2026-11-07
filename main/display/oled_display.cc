@@ -176,7 +176,17 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     lv_point_t text_sz;
     lv_text_get_size(&text_sz, content_str.c_str(), font, letter_space, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
     int32_t text_w = text_sz.x;
+    // 标签是自适应宽度（=整句宽度），不能用它自己的 content_width 当可视宽度，
+    // 否则 overflow 恒为 0 → 后几个字永远停在屏幕外不滚出来（2026-11-07 实测）。
+    // 正解：取父容器可用宽度，再扣除标签在容器内的左偏移。
     int32_t vis_w = lv_obj_get_content_width(chat_message_label_);
+    lv_obj_t* cont = lv_obj_get_parent(chat_message_label_);
+    if (cont != nullptr) {
+        int32_t avail = lv_obj_get_content_width(cont) - lv_obj_get_x(chat_message_label_);
+        if (avail > 0 && avail < vis_w) {
+            vis_w = avail;
+        }
+    }
     int32_t overflow = text_w - vis_w;
     if (overflow > 2) {
         lv_obj_set_style_translate_x(chat_message_label_, 0, LV_PART_MAIN);
