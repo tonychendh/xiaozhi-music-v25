@@ -188,7 +188,7 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     lv_obj_get_coords(chat_message_label_, &area);
     int32_t start_t = -area.x1;                                   // 句头精确落屏幕 x=0
     int32_t right_after = start_t + area.x1 + text_w;             // = text_w
-    int32_t end_t = (scr_w - 18) - right_after;                   // 句尾留一个字宽余量定格（2026-11-07 实测贴边时末字被物理边界裁掉）
+    int32_t end_t = (scr_w - 26) - right_after;                   // 句尾留一个字半余量定格（2026-11-07 用户定稿：再稳半个字）
     if (end_t > start_t) {
         end_t = start_t;  // 短句放得下：定格在起点不滚
     }
@@ -204,7 +204,7 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
         });
         lv_anim_set_values(&a, start_t, end_t);
         lv_anim_set_duration(&a, static_cast<uint32_t>((start_t - end_t) * 30));  // ~33px/s（2026-11-07 调参：整段动画须落在单句~2s窗口内）
-        lv_anim_set_delay(&a, 150);
+        lv_anim_set_delay(&a, 500);  // 句头静显半秒（2026-11-07 用户定稿：0.15s 看不清首字，0.6s 会撞句窗，0.5s 折中）
         // v7 终极探针：动画自然结束=滚到位；此日志缺失=被中途掐；坐标不足128=还有裁切层
         lv_anim_set_user_data(&a, chat_message_label_);
         lv_anim_set_completed_cb(&a, [](lv_anim_t* anim) {
