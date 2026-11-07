@@ -206,8 +206,9 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
         lv_anim_set_duration(&a, static_cast<uint32_t>((start_t - end_t) * 30));  // ~33px/s（2026-11-07 调参：整段动画须落在单句~2s窗口内）
         lv_anim_set_delay(&a, 150);
         // v7 终极探针：动画自然结束=滚到位；此日志缺失=被中途掐；坐标不足128=还有裁切层
+        lv_anim_set_user_data(&a, chat_message_label_);
         lv_anim_set_completed_cb(&a, [](lv_anim_t* anim) {
-            lv_obj_t* lbl = static_cast<lv_obj_t*>(lv_anim_get_var(anim));
+            lv_obj_t* lbl = static_cast<lv_obj_t*>(lv_anim_get_user_data(anim));
             if (lbl == nullptr) {
                 return;
             }
