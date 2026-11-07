@@ -186,7 +186,7 @@ void OledDisplay::SetChatMessage(const char* role, const char* content) {
     int32_t scr_w = scr != nullptr ? lv_obj_get_width(scr) : 128;
     lv_area_t area;
     lv_obj_get_coords(chat_message_label_, &area);
-    int32_t start_t = -area.x1;                                   // 句头精确落屏幕 x=0
+    int32_t start_t = -area.x1 + 3;                               // 句头落屏并右让 3px（2026-11-07 实测字形左伸被裁约六分之一）
     int32_t right_after = start_t + area.x1 + text_w;             // = text_w
     int32_t end_t = (scr_w - 26) - right_after;                   // 句尾留一个字半余量定格（2026-11-07 用户定稿：再稳半个字）
     if (end_t > start_t) {
