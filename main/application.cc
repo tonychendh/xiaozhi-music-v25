@@ -814,8 +814,8 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
     audio_service_.ResetDecoder();
     // 唤醒词引擎的释放/恢复由 MusicPlayer 播放任务内部处理
     // （需等主循环 idle 处理完成后执行，见 music_player.cc Run()）
-    return music_player_.Start(url, title, artist, audio_service_, [this]() {
-        Schedule([this]() {
+    return music_player_.Start(url, title, artist, audio_service_, [this, url]() {
+        Schedule([this, url]() {
             if (GetDeviceState() == kDeviceStateIdle) {
                 // C3 走 lite 引擎，IsAfeWakeWord() 恒为 false，必须无条件恢复
                 // （EnableWakeWordDetection 内部会自行判断有无唤醒词模型）
@@ -825,6 +825,13 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
                 auto display = Board::GetInstance().GetDisplay();
                 if (display != nullptr) {
                     display->SetChatMessage("system", Lang::Strings::STANDBY);
+                }
+                // 新闻播完：此刻唤醒引擎已恢复，再进聆听等"第几条/下一批"指令。
+                // （2026-11-08 修复：原先由播放器任务直接 StartListening，与本回调
+                //  存在竞态——聆听窗口超时后唤醒引擎可能没恢复，导致"你好小智"失灵）
+                if (url.find("/news_") != std::string::npos) {
+                    ESP_LOGI(TAG, "新闻播完，进入聆听等待指令");
+                    StartListening();
                 }
             }
         });
