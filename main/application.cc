@@ -830,15 +830,18 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
                 // 兜底重试一次（新闻期间 MQTT 客户端被防御性掐停，首次开频道可能撞上
                 // 冷连接失败导致"假聆听"；重试时链路已热）。状态非 idle 则自动跳过。
                 if (url.find("/news_") != std::string::npos) {
-                    ESP_LOGI(TAG, "新闻播完，安排自动聆听");
+                    ESP_LOGI(TAG, "新闻播完，安排自动聆听（6s/17s/28s 三段）");
                     xTaskCreate([](void*) {
                         auto& app = Application::GetInstance();
-                        for (int i = 0; i < 2; ++i) {
-                            vTaskDelay(pdMS_TO_TICKS(i == 0 ? 1200 : 8000));
-                            app.Schedule([]() {
+                        // 播放期间 MQTT 客户端被防御性掐停，重连定时器 15 秒一跳；
+                        // 6s 试一次（多半还冷），17s/28s 在 broker 重建后命中真聆听。
+                        const int kDelays[] = {6000, 11000, 11000};
+                        for (int i = 0; i < 3; ++i) {
+                            vTaskDelay(pdMS_TO_TICKS(kDelays[i]));
+                            app.Schedule([i]() {
                                 auto& a = Application::GetInstance();
                                 if (a.GetDeviceState() == kDeviceStateIdle) {
-                                    ESP_LOGI(TAG, "新闻后自动聆听（第%d次尝试）", 1);
+                                    ESP_LOGI(TAG, "新闻后自动聆听尝试 #%d", i + 1);
                                     a.StartListening();
                                 }
                             });
