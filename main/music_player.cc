@@ -460,16 +460,6 @@ void MusicPlayer::Run(TaskArgs* args) {
     if (args->on_finished) {
         args->on_finished();
     }
-
-    // 新闻 v2（2026-11-08 用户要求）：简报（URL 含 /news_）自然播完后不躺平待命，
-    // 自动进入聆听状态，方便用户接着说"第3条""下一批"。被手动停止则不触发。
-    if (playback_finished && !stop_requested_.load() &&
-        url.find("/news_") != std::string::npos) {
-        ESP_LOGI(TAG, "新闻播完，进入聆听等待指令");
-        Application::GetInstance().Schedule([]() {
-            if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
-                Application::GetInstance().StartListening();
-            }
-        });
-    }
+    // 注：新闻播完的"进聆听"已挪到 application.cc on_finished 内（唤醒恢复之后），
+    // 避免与唤醒引擎恢复竞态（2026-11-08）。
 }
