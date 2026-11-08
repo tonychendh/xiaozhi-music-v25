@@ -826,12 +826,25 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
                 if (display != nullptr) {
                     display->SetChatMessage("system", Lang::Strings::STANDBY);
                 }
-                // 新闻播完：此刻唤醒引擎已恢复，再进聆听等"第几条/下一批"指令。
-                // （2026-11-08 修复：原先由播放器任务直接 StartListening，与本回调
-                //  存在竞态——聆听窗口超时后唤醒引擎可能没恢复，导致"你好小智"失灵）
+                // 新闻播完：唤醒引擎已恢复，安排"自动聆听"两段式——立即一次 + 8 秒后
+                // 兜底重试一次（新闻期间 MQTT 客户端被防御性掐停，首次开频道可能撞上
+                // 冷连接失败导致"假聆听"；重试时链路已热）。状态非 idle 则自动跳过。
                 if (url.find("/news_") != std::string::npos) {
-                    ESP_LOGI(TAG, "新闻播完，进入聆听等待指令");
-                    StartListening();
+                    ESP_LOGI(TAG, "新闻播完，安排自动聆听");
+                    xTaskCreate([](void*) {
+                        auto& app = Application::GetInstance();
+                        for (int i = 0; i < 2; ++i) {
+                            vTaskDelay(pdMS_TO_TICKS(i == 0 ? 1200 : 8000));
+                            app.Schedule([]() {
+                                auto& a = Application::GetInstance();
+                                if (a.GetDeviceState() == kDeviceStateIdle) {
+                                    ESP_LOGI(TAG, "新闻后自动聆听（第%d次尝试）", 1);
+                                    a.StartListening();
+                                }
+                            });
+                        }
+                        vTaskDelete(nullptr);
+                    }, "news_lsn", 3072, nullptr, 5, nullptr);
                 }
             }
         });
