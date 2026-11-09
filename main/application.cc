@@ -830,22 +830,26 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
                 // 兜底重试一次（新闻期间 MQTT 客户端被防御性掐停，首次开频道可能撞上
                 // 冷连接失败导致"假聆听"；重试时链路已热）。状态非 idle 则自动跳过。
                 if (url.find("/news_") != std::string::npos) {
-                    ESP_LOGI(TAG, "新闻播完，安排自动聆听（6s/17s/28s 三段）");
+                    ESP_LOGI(TAG, "新闻播完，条件性安排聆听");
                     xTaskCreate([](void*) {
                         auto& app = Application::GetInstance();
-                        // 播放期间 MQTT 客户端被防御性掐停，重连定时器 15 秒一跳；
-                        // 6s 试一次（多半还冷），17s/28s 在 broker 重建后命中真聆听。
-                        const int kDelays[] = {6000, 11000, 11000};
-                        for (int i = 0; i < 3; ++i) {
-                            vTaskDelay(pdMS_TO_TICKS(kDelays[i]));
-                            app.Schedule([i]() {
-                                auto& a = Application::GetInstance();
-                                if (a.GetDeviceState() == kDeviceStateIdle) {
-                                    ESP_LOGI(TAG, "新闻后自动聆听尝试 #%d", i + 1);
-                                    a.StartListening();
-                                }
-                            });
-                        }
+                        vTaskDelay(pdMS_TO_TICKS(1500));
+                        app.Schedule([]() {
+                            auto& a = Application::GetInstance();
+                            if (a.GetDeviceState() != kDeviceStateIdle) {
+                                return;
+                            }
+                            // 2026-11-09 修正：频道已死时硬 StartListening 会连环触发
+                            // TLS 重连（每 10s select 超时），堆被撕到 10K 震荡后
+                            // ReceiveTask bad_alloc 崩溃。只在频道存活时进聆听；
+                            // 频道死了就安静待命，唤醒词路径自带正规重连。
+                            if (a.protocol_ != nullptr && a.protocol_->IsAudioChannelOpened()) {
+                                ESP_LOGI(TAG, "新闻播完，进入聆听等待指令");
+                                a.StartListening();
+                            } else {
+                                ESP_LOGI(TAG, "新闻播完，频道不可用，保持待命");
+                            }
+                        });
                         vTaskDelete(nullptr);
                     }, "news_lsn", 3072, nullptr, 5, nullptr);
                 }
