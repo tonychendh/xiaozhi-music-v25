@@ -1120,8 +1120,6 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
         sdmmc
     )
 endif()
-# Enable C++ exceptions for ogg demuxer (subtitle buffer fallback, 2026-11-10)
-set_source_files_properties(audio/demuxer/ogg_demuxer.cc PROPERTIES COMPILE_FLAGS "-fexceptions")
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
@@ -1155,7 +1153,7 @@ idf_component_register(SRCS ${SOURCES}
 # Keep project-owned C++ on GNU C++23. ESP-IDF 6 may default to a newer
 # dialect; pin the baseline so main/ does not depend on it.
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
-    target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)
+    target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23 -fexceptions>)
 endif()
 
 # Use target_compile_definitions to define the reported board identity
