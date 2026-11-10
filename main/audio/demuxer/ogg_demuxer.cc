@@ -272,13 +272,49 @@ size_t OggDemuxer::Process(const uint8_t* data, size_t size)
                 // 避免撑爆 2048 的 packet_buf；固件按指针 seek，用完随 Reset 释放。
                 if (!opus_info_.tags_seen && ctx_.packet_len >= 8 &&
                     memcmp(ctx_.packet_buf, "OpusTags", 8) == 0) {
+                    // 2026-11-10 防崩定案：一次性 reserve 避免逐段翻倍扩容在碎片堆上
+                    // 反复要连续块（第2条必崩元凶）；全程 try/catch——字幕分配失败
+                    // 只放弃字幕，绝不让 bad_alloc 把设备炸掉。
                     if (!comment_routing_) {
                         comment_routing_ = true;
-                        comment_.assign(reinterpret_cast<char*>(ctx_.packet_buf), ctx_.packet_len);
+                        try {
+                            comment_.reserve(5200);
+                            comment_.assign(reinterpret_cast<char*>(ctx_.packet_buf), ctx_.packet_len);
+                        } catch (...) {
+                            comment_routing_ = false;
+                            comment_.clear();
+                            ESP_LOGW(TAG, "字幕缓冲分配失败，本段放弃字幕");
+                        }
+                    }
+                    if (!comment_routing_) {
+                        // 字幕已放弃：把整个 tags 包按跳过方式吞掉（不能走普通路径，
+                        // 否则会撑爆 2048 的 packet_buf）
+                        size_t skip = std::min(size - processed, (size_t)seg_len);
+                        processed += skip;
+                        ctx_.packet_len += skip;
+                        ctx_.body_offset += skip;
+                        ctx_.seg_remaining -= skip;
+                        if (ctx_.seg_remaining > 0) {
+                            return processed;
+                        }
+                        if (ctx_.seg_table[ctx_.seg_index] != 255) {
+                            opus_info_.tags_seen = true;
+                            comment_ready_ = false;
+                            ctx_.packet_len = 0;
+                            ctx_.packet_continued = false;
+                        }
+                        ctx_.seg_index++;
+                        continue;
                     }
                     size_t to_copy = std::min(size - processed, (size_t)seg_len);
                     if (comment_.size() < 5120) {
-                        comment_.append(reinterpret_cast<const char*>(data + processed), to_copy);
+                        try {
+                            comment_.append(reinterpret_cast<const char*>(data + processed), to_copy);
+                        } catch (...) {
+                            comment_.clear();
+                            comment_routing_ = false;
+                            ESP_LOGW(TAG, "字幕缓冲追加失败，剩余部分跳过");
+                        }
                     }
                     processed += to_copy;
                     ctx_.packet_len += to_copy;
@@ -372,8 +408,13 @@ size_t OggDemuxer::Process(const uint8_t* data, size_t size)
                             if (ctx_.packet_len >= 8 && memcmp(ctx_.packet_buf, "OpusTags", 8) == 0) {
                                 opus_info_.tags_seen = true;
                                 // 小包路径同样捕获（无 SUBS 时 comment_ 仅几十字节）
-                                comment_.assign(reinterpret_cast<char*>(ctx_.packet_buf), ctx_.packet_len);
-                                comment_ready_ = true;
+                                try {
+                                    comment_.assign(reinterpret_cast<char*>(ctx_.packet_buf), ctx_.packet_len);
+                                    comment_ready_ = true;
+                                } catch (...) {
+                                    comment_ready_ = false;
+                                    comment_.clear();
+                                }
                                 ESP_LOGD(TAG, "OpusTags found.");
                                 ctx_.packet_len = 0;
                                 ctx_.packet_continued = false;
