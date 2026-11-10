@@ -1,4 +1,5 @@
 #include "music_player.h"
+#include <string_view>
 
 #include "application.h"
 #include "audio/audio_service.h"
@@ -296,7 +297,7 @@ void MusicPlayer::Run(TaskArgs* args) {
         if (kSubtitlesEnabled) {
             if (!cap_init && demuxer.HasComment()) {
                 cap_init = true;
-                const std::string& raw = demuxer.comment();
+                    std::string_view raw = demuxer.comment();
                 size_t s = raw.find("SUBS=");
                 if (s != std::string::npos) {
                     cap_p = raw.data() + s + 5;
