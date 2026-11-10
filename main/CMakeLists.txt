@@ -1120,7 +1120,7 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
         sdmmc
     )
 endif()
-# 字幕路由 try/catch 需要异常处理：仅为 ogg 解复用器开启（2026-11-10 字幕分配失败降级不崩）
+# Enable C++ exceptions for ogg demuxer (subtitle buffer fallback, 2026-11-10)
 set_source_files_properties(audio/demuxer/ogg_demuxer.cc PROPERTIES COMPILE_FLAGS "-fexceptions")
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
