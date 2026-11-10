@@ -297,16 +297,12 @@ void MusicPlayer::Run(TaskArgs* args) {
         if (kSubtitlesEnabled) {
             if (!cap_init && demuxer.HasComment()) {
                 cap_init = true;
-                    std::string_view raw = demuxer.comment();
-                if (raw.size() > 6000) {
-                        size_t s = std::string_view::npos;
-                        if (raw.size() <= 6000) {
-                            ESP_LOGI(TAG, "MP-C2 before raw.find len=%u ready=%d", (unsigned)raw.size(), (int)demuxer.HasComment());
-                            s = raw.find("SUBS=");
-                        } else {
-                            ESP_LOGE(TAG, "!! rawlen ABNORMAL=%u", (unsigned)raw.size());
-                        }
-                if (s != std::string::npos) {
+                std::string_view raw = demuxer.comment();
+                ESP_LOGI(TAG, "MP-C2 raw len=%u ready=%d", (unsigned)raw.size(),
+                         (int)demuxer.HasComment());
+                size_t s = (raw.size() <= 6000) ? raw.find("SUBS=")
+                                                : std::string_view::npos;
+                if (s != std::string_view::npos) {
                     cap_p = raw.data() + s + 5;
                     cap_end = raw.data() + raw.size();
                     cap_active = NextCaptionEntry(cap_p, cap_end, cap_next_t,
@@ -356,7 +352,7 @@ void MusicPlayer::Run(TaskArgs* args) {
             is_book = url.find("/book_") != std::string::npos;
             ESP_LOGI(TAG, "MP-C1 after");
         } else {
-            ESP_LOGE(TAG, "!! urllen ABNORMAL=%u title_len=%u", (unsigned)url.size(), (unsigned)title.size());
+            ESP_LOGE(TAG, "!! urllen ABNORMAL=%u", (unsigned)url.size());
         }
         cap_p = nullptr;
         cap_end = nullptr;
