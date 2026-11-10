@@ -298,7 +298,8 @@ void MusicPlayer::Run(TaskArgs* args) {
             if (!cap_init && demuxer.HasComment()) {
                 cap_init = true;
                     std::string_view raw = demuxer.comment();
-                size_t s = raw.find("SUBS=");
+                ESP_LOGI(TAG, "MP-C2 before raw.find len=%u ready=%d", (unsigned)raw.size(), (int)demuxer.HasComment());
+                        size_t s = raw.find("SUBS=");
                 if (s != std::string::npos) {
                     cap_p = raw.data() + s + 5;
                     cap_end = raw.data() + raw.size();
@@ -343,7 +344,8 @@ void MusicPlayer::Run(TaskArgs* args) {
     for (;;) {
         playback_failed = false;
         playback_finished = false;
-        const bool is_book = url.find("/book_") != std::string::npos;
+        ESP_LOGI(TAG, "MP-C1 before url.find urllen=%u", (unsigned)url.size());
+                    const bool is_book = url.find("/book_") != std::string::npos; ESP_LOGI(TAG, "MP-C1 after");
         cap_p = nullptr;
         cap_end = nullptr;
         cap_next_t = -1;
