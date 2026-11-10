@@ -298,8 +298,14 @@ void MusicPlayer::Run(TaskArgs* args) {
             if (!cap_init && demuxer.HasComment()) {
                 cap_init = true;
                     std::string_view raw = demuxer.comment();
-                ESP_LOGI(TAG, "MP-C2 before raw.find len=%u ready=%d", (unsigned)raw.size(), (int)demuxer.HasComment());
-                        size_t s = raw.find("SUBS=");
+                if (raw.size() > 6000) {
+                        size_t s = std::string_view::npos;
+                        if (raw.size() <= 6000) {
+                            ESP_LOGI(TAG, "MP-C2 before raw.find len=%u ready=%d", (unsigned)raw.size(), (int)demuxer.HasComment());
+                            s = raw.find("SUBS=");
+                        } else {
+                            ESP_LOGE(TAG, "!! rawlen ABNORMAL=%u", (unsigned)raw.size());
+                        }
                 if (s != std::string::npos) {
                     cap_p = raw.data() + s + 5;
                     cap_end = raw.data() + raw.size();
@@ -344,8 +350,14 @@ void MusicPlayer::Run(TaskArgs* args) {
     for (;;) {
         playback_failed = false;
         playback_finished = false;
-        ESP_LOGI(TAG, "MP-C1 before url.find urllen=%u", (unsigned)url.size());
-                    const bool is_book = url.find("/book_") != std::string::npos; ESP_LOGI(TAG, "MP-C1 after");
+        bool is_book = false;
+        if (url.size() >= 8 && url.size() <= 200) {
+            ESP_LOGI(TAG, "MP-C1 before url.find urllen=%u", (unsigned)url.size());
+            is_book = url.find("/book_") != std::string::npos;
+            ESP_LOGI(TAG, "MP-C1 after");
+        } else {
+            ESP_LOGE(TAG, "!! urllen ABNORMAL=%u title_len=%u", (unsigned)url.size(), (unsigned)title.size());
+        }
         cap_p = nullptr;
         cap_end = nullptr;
         cap_next_t = -1;
