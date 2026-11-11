@@ -1,4 +1,5 @@
 #include "audio_service.h"
+#include <esp_heap.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_log.h>
@@ -461,10 +462,14 @@ void AudioService::OpusCodecTask() {
                 audio_playback_queue_.push_back(std::move(task));
             }
             if ((++diag_decode_n_ % 60) == 0) {
-                ESP_LOGW("MPDIAG", "解码侧 计数=%u heap=%u blk=%u",
+                multi_heap_info_t hi;
+                heap_caps_get_info(&hi, MALLOC_CAP_INTERNAL);
+                ESP_LOGW("MPDIAG", "账本级 计数=%u heap=%u alloc=%u maxblk=%u holes=%u",
                          (unsigned)diag_decode_n_,
                          (unsigned)esp_get_free_heap_size(),
-                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+                         (unsigned)(hi.total_bytes - hi.free_bytes),
+                         (unsigned)hi.maximum_free_block,
+                         (unsigned)hi.total_free_blocks);
             }
             decode_in_flight_ = false;
             debug_statistics_.decode_count++;
