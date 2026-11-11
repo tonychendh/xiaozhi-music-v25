@@ -271,21 +271,6 @@ void MusicPlayer::Run(TaskArgs* args) {
         if (stop_requested_.load() || playback_failed || audio_service_ == nullptr) {
             return;
         }
-        // v48 诊断开关：30 包后丢弃不投递（只测网络/demuxer 链的水位斜率）
-        if (total_packets + drops_ >= 30) {
-            drops_++;
-            const int64_t now_us = esp_timer_get_time();
-            if (t_first_us == 0) {
-                t_first_us = now_us;
-            } else if (drops_ > 6) {
-                const int64_t target_us =
-                    t_first_us + (static_cast<int64_t>(drops_) - 6) * 60000;
-                if (now_us < target_us) {
-                    vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>((target_us - now_us) / 1000) + 1));
-                }
-            }
-            return;
-        }
         auto packet = std::make_unique<AudioStreamPacket>();
         // 流由本机转码生成，固定 24k 单声道 60ms，与设备解码器配置一致
         packet->sample_rate = 24000;
@@ -298,10 +283,9 @@ void MusicPlayer::Run(TaskArgs* args) {
         }
         total_packets++;
         if ((total_packets % 30) == 0) {
-            ESP_LOGI(TAG, "MP-Q 包=%u heap=%u blk=%u 丢弃=%u", (unsigned)total_packets,
+            ESP_LOGW("MPDIAG", "投递侧 包=%u heap=%u blk=%u", (unsigned)total_packets,
                      (unsigned)esp_get_free_heap_size(),
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                     (unsigned)drops_);
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         }
         if (drops_ > 0 && (drops_ % 100) == 0) {
             ESP_LOGI(TAG, "MP-DROP 丢=%u heap=%u blk=%u", (unsigned)drops_,
