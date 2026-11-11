@@ -285,7 +285,7 @@ void MusicPlayer::Run(TaskArgs* args) {
         total_packets++;
         // v56 判决实验：每 400 包（24s）强制复位解码器与队列。
         // alloc 爬升被削平=累积源在解码/队列驻留；依旧爬升=另有慢泄漏点。
-        if ((total_packets % 400) == 0) {
+        if (false) {  // v57: 复位实验结束，分段续播根治
             ESP_LOGW(TAG, "MP-RST 复位解码器 包=%u heap=%u", (unsigned)total_packets,
                      (unsigned)esp_get_free_heap_size());
             audio_service_->ResetDecoder();
