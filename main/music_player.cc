@@ -350,6 +350,12 @@ void MusicPlayer::Run(TaskArgs* args) {
 
     ESP_LOGI(TAG, "MP-B0 Run entered urllen=%u heap=%u", (unsigned)url.size(),
              (unsigned)esp_get_free_heap_size());
+    // v47 错峰沉降（2026-11-11）：桥接缓存命中时 play_url 紧跟播报指令下发，
+    // 对话 TTS 的下行接收链与音乐 HTTP 接收链（rx缓冲/body队列/socket）并发
+    // 各吃 ~20K 堆，C3 只剩 60K 直接击穿。旧时代转码耗时 3~8s 天然错峰从未暴露。
+    // 等 2.5s 让对话音频队列按实时排空、接收缓冲回缩后再开流。
+    vTaskDelay(pdMS_TO_TICKS(2500));
+    ESP_LOGI(TAG, "MP-S settle done heap=%u", (unsigned)esp_get_free_heap_size());
     constexpr int kReadBufSize = 2048;
     uint8_t* in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
     int chain_retries = 0;  // 同一连播会话内"重发当前段"次数（防坏流死循环）
