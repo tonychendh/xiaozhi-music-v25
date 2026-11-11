@@ -272,8 +272,9 @@ void MusicPlayer::Run(TaskArgs* args) {
             return;
         }
         auto packet = std::make_unique<AudioStreamPacket>();
-        // 流由本机转码生成，固定 24k 单声道 60ms，与设备解码器配置一致
-        packet->sample_rate = 24000;
+        // v50: 本机转码改 16k 单声道 60ms——与云端 TTS 完全同款配置，
+        // 绕开 24k 解码器路径的每包 ~60-140B 泄漏（v49 三段水位判定）。
+        packet->sample_rate = 16000;
         packet->frame_duration = 60;
         packet->payload.assign(data, data + size);
         if (!audio_service_->PushPacketToDecodeQueue(std::move(packet), true)) {
