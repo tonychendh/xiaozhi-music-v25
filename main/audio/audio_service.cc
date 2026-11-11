@@ -1,4 +1,6 @@
 #include "audio_service.h"
+#include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <esp_log.h>
 #include <cstring>
 
@@ -353,6 +355,12 @@ void AudioService::AudioOutputTask() {
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
         debug_statistics_.playback_count++;
+        if ((++diag_output_n_ % 60) == 0) {
+            ESP_LOGW("MPDIAG", "输出侧 计数=%u heap=%u blk=%u",
+                     (unsigned)diag_output_n_,
+                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        }
 
         bool notify_drained = false;
         lock.lock();
@@ -451,6 +459,12 @@ void AudioService::OpusCodecTask() {
             lock.lock();
             if (decoded && generation == playback_generation_ && !service_stopped_.load()) {
                 audio_playback_queue_.push_back(std::move(task));
+            }
+            if ((++diag_decode_n_ % 60) == 0) {
+                ESP_LOGW("MPDIAG", "解码侧 计数=%u heap=%u blk=%u",
+                         (unsigned)diag_decode_n_,
+                         (unsigned)esp_get_free_heap_size(),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
             }
             decode_in_flight_ = false;
             debug_statistics_.decode_count++;
