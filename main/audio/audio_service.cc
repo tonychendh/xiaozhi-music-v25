@@ -470,6 +470,12 @@ void AudioService::OpusCodecTask() {
                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT));
             }
+            // v55 终审：定期全堆完整性巡检。返回 false=元数据被写坏（真破坏者还在）；
+            // 全程 true 而分配仍失败=耗尽。IDF 会自动打印具体坏块。
+            if ((diag_decode_n_ % 120) == 0) {
+                bool ok = heap_caps_check_integrity_all(true);
+                ESP_LOGW("MPDIAG", "体质检查#%u ok=%d", (unsigned)diag_decode_n_, (int)ok);
+            }
             decode_in_flight_ = false;
             debug_statistics_.decode_count++;
             const bool notify_drained = MarkPlaybackDrainedLocked();
