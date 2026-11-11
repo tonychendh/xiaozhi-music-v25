@@ -281,6 +281,11 @@ void MusicPlayer::Run(TaskArgs* args) {
             return;
         }
         total_packets++;
+        if ((total_packets % 30) == 0) {
+            ESP_LOGI(TAG, "MP-Q 包=%u heap=%u blk=%u", (unsigned)total_packets,
+                     (unsigned)esp_get_free_heap_size(),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+        }
         // 生产者节流：官方解码队列深 166 包（~55K 堆内存），局域网速度会瞬间灌满
         // 并长期占住——这是长播放内存耗尽 abort 重启的主因。把领先量压到 ~10 包
         // （0.6 秒音频，实测 33 包仍不够：官方 PCM 管线本身吃 ~35K），省出 ~50K；
@@ -410,10 +415,19 @@ void MusicPlayer::Run(TaskArgs* args) {
                     playback_finished = true;
                     break;
                 }
+                unsigned lb0 = 0, hb0 = 0;
+                const bool probe = (loop_n < 32) || ((loop_n % 16) == 0);
+                if (probe) {
+                    hb0 = (unsigned)esp_get_free_heap_size();
+                    lb0 = (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+                }
                 demuxer.Process(in_buf, read_bytes);
-                if (((++loop_n) & 7) == 0) {
-                    ESP_LOGI(TAG, "读循环#%u 空闲堆=%u 包=%u", loop_n,
+                ++loop_n;
+                if (probe) {
+                    ESP_LOGI(TAG, "MP-T#%u 收%d后=%u/%u 解析后=%u/%u 包=%u",
+                             loop_n, read_bytes, hb0, lb0,
                              (unsigned)esp_get_free_heap_size(),
+                             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
                              (unsigned)total_packets);
                 }
             }
