@@ -300,9 +300,9 @@ void MusicPlayer::Run(TaskArgs* args) {
         const int64_t now_us = esp_timer_get_time();
         if (t_first_us == 0) {
             t_first_us = now_us;
-        } else if (total_packets > 6) {
+        } else if (total_packets > 8) {
             const int64_t target_us =
-                t_first_us + (static_cast<int64_t>(total_packets) - 6) * 60000;
+                t_first_us + (static_cast<int64_t>(total_packets) - 8) * 60000;
             if (now_us < target_us) {
                 vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>((target_us - now_us) / 1000) + 1));
             }
@@ -363,7 +363,8 @@ void MusicPlayer::Run(TaskArgs* args) {
     // 等 2.5s 让对话音频队列按实时排空、接收缓冲回缩后再开流。
     vTaskDelay(pdMS_TO_TICKS(2500));
     ESP_LOGI(TAG, "MP-S settle done heap=%u", (unsigned)esp_get_free_heap_size());
-    constexpr int kReadBufSize = 2048;
+    // v53 同拍流控：与服务器 200B/50ms 出品节拍对齐，尺寸谱收敛
+    constexpr int kReadBufSize = 176;
     uint8_t* in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
     int chain_retries = 0;  // 同一连播会话内"重发当前段"次数（防坏流死循环）
     for (;;) {
