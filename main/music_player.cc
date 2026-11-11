@@ -283,6 +283,14 @@ void MusicPlayer::Run(TaskArgs* args) {
             return;
         }
         total_packets++;
+        // v56 判决实验：每 400 包（24s）强制复位解码器与队列。
+        // alloc 爬升被削平=累积源在解码/队列驻留；依旧爬升=另有慢泄漏点。
+        if ((total_packets % 400) == 0) {
+            ESP_LOGW(TAG, "MP-RST 复位解码器 包=%u heap=%u", (unsigned)total_packets,
+                     (unsigned)esp_get_free_heap_size());
+            audio_service_->ResetDecoder();
+            vTaskDelay(pdMS_TO_TICKS(900));
+        }
         if ((total_packets % 30) == 0) {
             ESP_LOGW("MPDIAG", "投递侧 包=%u heap=%u blk=%u", (unsigned)total_packets,
                      (unsigned)esp_get_free_heap_size(),
