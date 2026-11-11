@@ -260,7 +260,10 @@ void MusicPlayer::Run(TaskArgs* args) {
     // 释放瞬间与音频通路/供电叠加导致 USB 掉线级联复位，风险大于收益，已回退。
     // 内存改由字幕瘦身（定长结构+4K上限）与更紧的节流（6 包）保障。
 
-    OggDemuxer demuxer;
+    // v43: demuxer 含 5200+2048+255B 固定缓冲(≈7.6KB)，必须堆分配——
+    // bdd25ee 起误留栈上，8192B 任务栈进门即 Stack protection fault。
+    auto demuxer_up = std::make_unique<OggDemuxer>();
+    OggDemuxer& demuxer = *demuxer_up;
     demuxer.OnPacket([&](const uint8_t* data, int sample_rate, int frame_duration_ms, size_t size) {
         (void)sample_rate;
         (void)frame_duration_ms;
