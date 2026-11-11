@@ -56,11 +56,11 @@ public:
     // 有声书字幕通道：桥接把字幕 JSON 塞进 OGG 的 COMMENT 元数据，
     // 随音频流同连接下发，设备无需再开第二条 HTTP 连接（历史秒崩根因）。
     // HasComment() 为 true 时 comment() 含完整 OpusTags 包内容。
-    // 2026-11-10 零动态分配重构：固定缓冲替代 std::string（字幕路径不再 new）。
     bool HasComment() const { return comment_ready_; }
-    std::string_view comment() const { return std::string_view(comment_buf_, comment_len_); }
+    const std::string& comment() const { return comment_; }
     void ClearComment() {
-        comment_len_ = 0;
+        comment_.clear();
+        comment_.shrink_to_fit();
         comment_ready_ = false;
     }
 
@@ -76,10 +76,7 @@ private:
     bool has_error_ = false;
     size_t packet_count_ = 0;
     std::function<void(const uint8_t*, int, int, size_t)> on_packet_;
-    // 固定字幕缓冲：路由直接写入，杜绝碎片堆上的 string 扩容 bad_alloc
-    static constexpr size_t kCommentCap = 5200;
-    char comment_buf_[kCommentCap] = {0};
-    uint16_t comment_len_ = 0;
+    std::string comment_;              // OpusTags 包累积（含 COMMENT=<json>）
     bool comment_routing_ = false;     // 当前包正按 tags 包模式累积
     bool comment_ready_ = false;       // tags 包完整收毕
 
