@@ -483,6 +483,12 @@ void MusicPlayer::Run(TaskArgs* args) {
             break;
         }
         ESP_LOGI(TAG, "有声书自动连播：%s", again ? "重发当前段" : "切换下一段");
+        // v61 根治：段间重建 opus 解码器实例。实测 esp_opus 解码器处理
+        // 语音类码流时每包在库内部多驻留 ~45B（歌曲流 0B/包），连续会话
+        // 到 ~270 包必把小机堆耗干 abort。demuxer.Reset 只清容器状态不碰
+        // 解码器，ResetDecoder=close+open 彻底归还库内累积——段间 ~0.3s
+        // 重建窗口由分段边界天然遮住，听感即既有翻页接缝。
+        audio_service_->ResetDecoder();
         demuxer.Reset();
         url = std::move(next);
     }
