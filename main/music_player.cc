@@ -118,7 +118,7 @@ static std::string FetchNextSegmentUrl(NetworkInterface* network, const std::str
     }
     size_t p = cur.find('/', s + 3);
     std::string base = (p == std::string::npos) ? cur : cur.substr(0, p);
-    auto http = network->CreateHttp(10);
+    auto http = network->CreateHttp(30);  // v80: 领段 RPC 耐心 60s，桥侧冷合成不再拖断
     if (http == nullptr) {
         return "";
     }
@@ -372,6 +372,7 @@ void MusicPlayer::Run(TaskArgs* args) {
     // v53 同拍流控：与服务器 200B/50ms 出品节拍对齐，尺寸谱收敛
     constexpr int kReadBufSize = 176;
     uint8_t* in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
+    int deadlink_retries = 0;  // v80: 领段断链自愈计数（与读失败重试分开）
     int chain_retries = 0;  // 同一连播会话内"重发当前段"次数（防坏流死循环）
     for (;;) {
         playback_failed = false;
@@ -477,8 +478,20 @@ void MusicPlayer::Run(TaskArgs* args) {
         }
         std::string next = FetchNextSegmentUrl(network, url, again);
         if (next.empty()) {
-            ESP_LOGI(TAG, "有声书连播结束（无下一段）");
-            break;
+            // v80 断链自愈：领段空/超时不再当"读完"（桥侧 RPC 偶发失败会误杀整本书），
+            // 当作"重发当前段"续链（?again=1 桥侧指针不推动作幂等）；
+            // 独立断链计数最多 4 次，仍失败才真停，绝不无限循环。
+            if (deadlink_retries < 4) {
+                deadlink_retries++;
+                ESP_LOGW(TAG, "有声书连播：领段未果，断链自愈重发当前段（第%d次）", deadlink_retries);
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                again = true;
+                next = FetchNextSegmentUrl(network, url, true);
+            }
+            if (next.empty()) {
+                ESP_LOGI(TAG, "有声书连播结束（无下一段）");
+                break;
+            }
         }
         ESP_LOGI(TAG, "有声书自动连播：%s", again ? "重发当前段" : "切换下一段");
         // v61 根治：段间重建 opus 解码器实例。实测 esp_opus 解码器处理
