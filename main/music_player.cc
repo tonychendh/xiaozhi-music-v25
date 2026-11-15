@@ -296,6 +296,17 @@ void MusicPlayer::Run(TaskArgs* args) {
                      (unsigned)esp_get_free_heap_size(),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         }
+        // v85: 投喂侧周期深复位——esp_opus 推包队列囤积 ~45B/包 线性泄漏，
+        // 段界 ResetDecoder 清不到队列侧（12:08 #561 abort 实锤 heap 耗尽）。
+        // 每 150 包强制解码器+队列全复位，囤积封顶 6.7KB（连播会话起点堆
+        // 仅 ~15K，300 包封顶 13.5K 会吃穿——150 为安全值）；500ms 沉降
+        // 由 8K 队列存货(2s)覆盖，听感连续。total_packets 不清零（节流基准连续）。
+        if (total_packets > 0 && (total_packets % 150) == 0) {
+            ESP_LOGW(TAG, "MP-RST5 周期深复位 包=%u heap=%u",
+                     (unsigned)total_packets, (unsigned)esp_get_free_heap_size());
+            audio_service_->ResetDecoder();
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
         if (drops_ > 0 && (drops_ % 100) == 0) {
             ESP_LOGI(TAG, "MP-DROP 丢=%u heap=%u blk=%u", (unsigned)drops_,
                      (unsigned)esp_get_free_heap_size(),
