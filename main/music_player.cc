@@ -301,17 +301,8 @@ void MusicPlayer::Run(TaskArgs* args) {
         // 每 150 包强制解码器+队列全复位，囤积封顶 6.7KB（连播会话起点堆
         // 仅 ~15K，300 包封顶 13.5K 会吃穿——150 为安全值）；500ms 沉降
         // 由 8K 队列存货(2s)覆盖，听感连续。total_packets 不清零（节流基准连续）。
-        // v89 排空安全序（13:52 实锤：复位竞态=残留包喂新解码器→坏包
-        // abort PC 0x42169645 新指纹；v45 官方先例=等队列排空再 close/open）。
-        // 不依赖新 API：先停喂 1.3s 让播放线程把队列自然抽干（8K 投喂缓冲
-        // 存货 >1.3s 播放，音频不断流），再复位+300ms 重建沉降。
-        if (total_packets > 0 && (total_packets % 150) == 0) {
-            ESP_LOGW(TAG, "MP-RST5b 排空后深复位 包=%u heap=%u",
-                     (unsigned)total_packets, (unsigned)esp_get_free_heap_size());
-            vTaskDelay(pdMS_TO_TICKS(1300));
-            audio_service_->ResetDecoder();
-            vTaskDelay(pdMS_TO_TICKS(300));
-        }
+                // v90: 周期深复位已撤——排空窗口不足致竞态崩(14:0x 实锤)。
+        // 仅保留段界 ResetDecoder(v61)；泄漏根治走 CELT 模式改造。
         if (drops_ > 0 && (drops_ % 100) == 0) {
             ESP_LOGI(TAG, "MP-DROP 丢=%u heap=%u blk=%u", (unsigned)drops_,
                      (unsigned)esp_get_free_heap_size(),
