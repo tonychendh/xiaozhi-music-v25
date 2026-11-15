@@ -501,6 +501,17 @@ void MusicPlayer::Run(TaskArgs* args) {
             }
         }
         ESP_LOGI(TAG, "有声书自动连播：%s", again ? "重发当前段" : "切换下一段");
+        // v92 计划性软复位：esp_opus/SILK 每包 ~45B 驻留不可回收（close+open
+        // 回收率实测=0，14:2x 三场 254-301 包崩），与其 255 包随机崩（伴
+        // 文件系统损坏风险），不如段界主动 esp_restart——堆全量归零、断点在
+        // 桥侧磁盘，用户一句"继续"无缝续读。约每 200 包（≈2 分钟）一次可控
+        // 重启，崩溃从事故变节奏。
+        if (total_packets >= 200 && !again && !stop_requested_.load()) {
+            ESP_LOGW(TAG, "MP-RST92 计划软复位 包=%u heap=%u（断点已存盘，说继续即续）",
+                     (unsigned)total_packets, (unsigned)esp_get_free_heap_size());
+            vTaskDelay(pdMS_TO_TICKS(800));
+            esp_restart();
+        }
         // v61 根治：段间重建 opus 解码器实例。实测 esp_opus 解码器处理
         // 语音类码流时每包在库内部多驻留 ~45B（歌曲流 0B/包），连续会话
         // 到 ~270 包必把小机堆耗干 abort。demuxer.Reset 只清容器状态不碰
