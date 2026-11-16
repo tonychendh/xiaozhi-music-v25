@@ -506,7 +506,7 @@ void MusicPlayer::Run(TaskArgs* args) {
         // 文件系统损坏风险），不如段界主动 esp_restart——堆全量归零、断点在
         // 桥侧磁盘，用户一句"继续"无缝续读。约每 200 包（≈2 分钟）一次可控
         // 重启，崩溃从事故变节奏。
-        if (total_packets >= 600 && !stop_requested_.load()
+        if (total_packets >= 100000  // v105: 泄漏已根治实证(4min连读)，保险丝退役(10万包≈50min，永不触及) && !stop_requested_.load()
                 && (url.find("/book_book_") != std::string::npos
                     || url.find("/book_news_") != std::string::npos
                     || url.find("/book_runway_") != std::string::npos)) {  // v99: 保险丝只装语音链，歌曲零驻留不该被复位  // v97b: 60字≈13s=217包<255线，段界复位已足够；600=3段外的远距保险，避免10秒一炸  // v97: 去掉 !again——重发路径同样必须复位(18:59 394包死实锤 again 跳过复位)  // v95: 180<死亡线255 硬保险，复位点=段边界(60字段)  // v93: 200→3000 纯保险
