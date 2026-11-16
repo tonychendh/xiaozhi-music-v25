@@ -522,6 +522,15 @@ void MusicPlayer::Run(TaskArgs* args) {
         url = std::move(next);
     }
 
+    // v118: 会话收尾自净——codec 2.6.2 斜率已降(45→23B/loop)，但解码器实例
+    // 跨会话残留把下一 Run 起点从 43K 压到 35K（13:01 曲线实锤"会话间累积"）。
+    // esp_audio_dec_process(SET_FORMAT, nullptr) 为官方清残留路径。
+    if (decoder_handle_ != nullptr) {
+        esp_audio_dec_reset(decoder_handle_);
+        esp_audio_dec_process(decoder_handle_, ESP_AUDIO_DEC_PROCESS_SET_FORMAT, nullptr);
+        ESP_LOGW(TAG, "MP-DECAY 会话收尾解码器自净 heap=%u",
+                 (unsigned)esp_get_free_heap_size());
+    }
     if (in_buf != nullptr) {
         heap_caps_free(in_buf);
     }
