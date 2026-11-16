@@ -501,10 +501,13 @@ void MusicPlayer::Run(TaskArgs* args) {
             }
         }
         ESP_LOGI(TAG, "有声书自动连播：%s", again ? "重发当前段" : "切换下一段");
-        // v114: 保险丝退役（v93 单编码流水线根治泄漏实证：6min+ 连读零崩）。
-        // 哨兵阈值 100000 包永不触发；保留块体仅作未知回归的最后防线。
-        if (total_packets >= 100000 && !stop_requested_.load()) {
-            ESP_LOGW(TAG, "MP-RST92 计划软复位 包=%u heap=%u",
+        // v92 计划性软复位：esp_opus/SILK 每包 ~45B 驻留不可回收（close+open
+        // 回收率实测=0，14:2x 三场 254-301 包崩），与其 255 包随机崩（伴
+        // 文件系统损坏风险），不如段界主动 esp_restart——堆全量归零、断点在
+        // 桥侧磁盘，用户一句"继续"无缝续读。约每 200 包（≈2 分钟）一次可控
+        // 重启，崩溃从事故变节奏。
+        if (total_packets >= 600 && !stop_requested_.load()) {  // v97b: 60字≈13s=217包<255线，段界复位已足够；600=3段外的远距保险，避免10秒一炸  // v97: 去掉 !again——重发路径同样必须复位(18:59 394包死实锤 again 跳过复位)  // v95: 180<死亡线255 硬保险，复位点=段边界(60字段)  // v93: 200→3000 纯保险
+            ESP_LOGW(TAG, "MP-RST92 计划软复位 包=%u heap=%u（断点已存盘，说继续即续）",
                      (unsigned)total_packets, (unsigned)esp_get_free_heap_size());
             vTaskDelay(pdMS_TO_TICKS(800));
             esp_restart();
@@ -514,7 +517,42 @@ void MusicPlayer::Run(TaskArgs* args) {
         // 到 ~270 包必把小机堆耗干 abort。demuxer.Reset 只清容器状态不碰
         // 解码器，ResetDecoder=close+open 彻底归还库内累积——段间 ~0.3s
         // 重建窗口由分段边界天然遮住，听感即既有翻页接缝。
-        // v114: 段界不再 ResetDecoder——泄漏已死，它仅存的副作用是
-        // 冲刷已解码未播完的队列尾巴(0.5~1s=吃尾真凶)。不冲刷则尾巴
-        // 播完自然接下一段头，连播近无缝。demuxer 复位保留（新 BOS 必重解析）。
-        demuxer.Reset();        demuxer.Reset();
+        // v114c: 段界不再 ResetDecoder——泄漏已死(v93 单编码流水线实证：
+        // 6min+ 连读零崩)，冲刷已解码未播完的队列尾巴是它仅存副作用
+        // (0.5~1s=吃尾真凶)。不冲刷则尾巴播完自然接下一段头，连播近无缝。
+        demuxer.Reset();
+        url = std::move(next);
+    }
+
+    if (in_buf != nullptr) {
+        heap_caps_free(in_buf);
+    }
+    if (audio_service_ != nullptr) {
+        audio_service_->SetExternalPlaybackActive(false);
+    }
+    board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        playing_.store(false);
+        last_url_ = url;
+        last_finished_ms_ = esp_timer_get_time() / 1000;
+        current_title_.clear();
+    }
+
+    if (stop_requested_.load()) {
+        ESP_LOGI(TAG, "音乐播放已被停止（已投递 %u 包）", static_cast<unsigned>(total_packets));
+    } else if (playback_failed) {
+        ESP_LOGW(TAG, "音乐播放失败");
+    } else if (playback_finished) {
+        ESP_LOGI(TAG, "音乐播放结束，共投递 %u 包", static_cast<unsigned>(total_packets));
+    }
+
+    // 唤醒词引擎恢复的唯一收口点：正常播完/失败/被停止都会走到这里。
+    // 回调内部 Application::Schedule 回主循环判 idle 后 EnableWakeWordDetection(true)，
+    // 该路径会自动 RestoreWakeWordResources 重建 WakeNet。
+    if (args->on_finished) {
+        args->on_finished();
+    }
+    // 注：新闻播完的"进聆听"已挪到 application.cc on_finished 内（唤醒恢复之后），
+    // 避免与唤醒引擎恢复竞态（2026-11-08）。
+}
