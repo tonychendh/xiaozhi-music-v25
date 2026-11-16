@@ -517,9 +517,7 @@ void MusicPlayer::Run(TaskArgs* args) {
         // 到 ~270 包必把小机堆耗干 abort。demuxer.Reset 只清容器状态不碰
         // 解码器，ResetDecoder=close+open 彻底归还库内累积——段间 ~0.3s
         // 重建窗口由分段边界天然遮住，听感即既有翻页接缝。
-        // v114c: 段界不再 ResetDecoder——泄漏已死(v93 单编码流水线实证：
-        // 6min+ 连读零崩)，冲刷已解码未播完的队列尾巴是它仅存副作用
-        // (0.5~1s=吃尾真凶)。不冲刷则尾巴播完自然接下一段头，连播近无缝。
+        audio_service_->ResetDecoder();
         demuxer.Reset();
         url = std::move(next);
     }
