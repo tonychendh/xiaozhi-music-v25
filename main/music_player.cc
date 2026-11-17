@@ -247,6 +247,7 @@ void MusicPlayer::Run(TaskArgs* args) {
     bool playback_failed = false;
     bool playback_finished = false;
     size_t total_packets = 0;
+    uint64_t total_audio_ms = 0;  // CELT根治: 累计音频时长(ms)，节流按此推进
     size_t drops_ = 0;  // v48 诊断
     int64_t t_first_us = 0;  // 首包投递时刻，生产者节流基准
 
@@ -275,7 +276,11 @@ void MusicPlayer::Run(TaskArgs* args) {
         // v50: 本机转码改 16k 单声道 60ms——与云端 TTS 完全同款配置，
         // 绕开 24k 解码器路径的每包 ~60-140B 泄漏（v49 三段水位判定）。
         packet->sample_rate = 16000;
-        packet->frame_duration = 60;
+        // CELT根治: 用 demuxer 解析出的真实帧长(CELT 20ms / SILK 60ms)。
+        // 写死60会让 20ms CELT 帧被按 60ms 解码→错乱。SetDecodeSampleRate 每包重建解码器跟随。
+        packet->frame_duration = (frame_duration_ms > 0) ? frame_duration_ms : 60;
+        // 累计音频时长，供节流按真实时间轴推进(20ms帧包数是60ms的3倍，不能用包数计时)。
+        total_audio_ms += packet->frame_duration;
         packet->payload.assign(data, data + size);
         if (!audio_service_->PushPacketToDecodeQueue(std::move(packet), true)) {
             ESP_LOGW(TAG, "解码队列投递失败（队列关闭或超时）");
@@ -316,8 +321,11 @@ void MusicPlayer::Run(TaskArgs* args) {
         if (t_first_us == 0) {
             t_first_us = now_us;
         } else if (total_packets > 8) {
+            // CELT根治: 预充偏移按当前帧长算(60ms帧=480ms/20ms帧=160ms)，
+            // 避免20ms帧下用固定480ms导致开头巨量音频无节流灌入。
+            const int64_t lead_ms = static_cast<int64_t>(frame_duration_ms > 0 ? frame_duration_ms : 60) * 8;
             const int64_t target_us =
-                t_first_us + (static_cast<int64_t>(total_packets) - 8) * 60000;
+                t_first_us + (static_cast<int64_t>(total_audio_ms) - lead_ms) * 1000;
             if (now_us < target_us) {
                 vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>((target_us - now_us) / 1000) + 1));
             }
