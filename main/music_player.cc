@@ -247,7 +247,8 @@ void MusicPlayer::Run(TaskArgs* args) {
     bool playback_failed = false;
     bool playback_finished = false;
     size_t total_packets = 0;
-    uint64_t total_audio_ms = 0;  // CELT根治: 累计音频时长(ms)，节流按此推进
+    uint64_t total_audio_ms = 0;  // CELT根治: 累计音频时长(ms)，节流按此推进(跨段不清零)
+    uint64_t cap_audio_ms = 0;    // 字幕专用时钟: 每段归零，与字幕t(每段从0)同基准
     size_t drops_ = 0;  // v48 诊断
     int64_t t_first_us = 0;  // 首包投递时刻，生产者节流基准
 
@@ -281,6 +282,7 @@ void MusicPlayer::Run(TaskArgs* args) {
         packet->frame_duration = (frame_duration_ms > 0) ? frame_duration_ms : 60;
         // 累计音频时长，供节流按真实时间轴推进(20ms帧包数是60ms的3倍，不能用包数计时)。
         total_audio_ms += packet->frame_duration;
+        cap_audio_ms += packet->frame_duration;  // 字幕时钟(段界归零)
         packet->payload.assign(data, data + size);
         if (!audio_service_->PushPacketToDecodeQueue(std::move(packet), true)) {
             ESP_LOGW(TAG, "解码队列投递失败（队列关闭或超时）");
@@ -357,7 +359,9 @@ void MusicPlayer::Run(TaskArgs* args) {
                 if (t_seg_us == 0) {
                     t_seg_us = tnow;
                 }
-                int64_t pos_ms = static_cast<int64_t>(total_audio_ms) - 80;
+                // 用每段归零的字幕时钟(非跨段累加的total_audio_ms)，否则换段后
+                // pos_ms 停在上段累计值、新段字幕t从0开始会被全跳过 -> 字幕消失。
+                int64_t pos_ms = static_cast<int64_t>(cap_audio_ms) - 80;
                 if (pos_ms < 0) {
                     pos_ms = 0;
                 }
@@ -412,6 +416,7 @@ void MusicPlayer::Run(TaskArgs* args) {
         cap_init = false;
         cap_active = false;
         t_seg_us = 0;
+        cap_audio_ms = 0;   // 换段: 字幕时钟归零，与新段字幕t(从0)重新对齐
         do {
             if (in_buf == nullptr) {
                 ESP_LOGE(TAG, "内存不足");
