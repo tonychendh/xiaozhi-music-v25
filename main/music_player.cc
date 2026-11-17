@@ -238,7 +238,7 @@ void MusicPlayer::Run(TaskArgs* args) {
     const char* cap_p = nullptr;
     const char* cap_end = nullptr;
     int cap_next_t = -1;
-    char cap_next_text[48] = {0};
+    char cap_next_text[80] = {0};  // 连续字幕: 服务端去硬截断后完整句最长实测69B，48会截尾丢字
     bool cap_init = false;
     bool cap_active = false;
     int64_t t_seg_us = 0;
@@ -350,29 +350,35 @@ void MusicPlayer::Run(TaskArgs* args) {
                 }
             }
             if (cap_active) {
+                // 连续字幕: 进度基准由墙钟改为"已投递音频时长"，字幕严格跟随朗读，
+                // 根治长文墙钟漂移导致的音字对不上。t_seg_us 保留仅作首包锚点日志。
+                // 投递领先实际播放约解码队列深度(~8包)，故减去 lead 补偿。
                 const int64_t tnow = esp_timer_get_time();
                 if (t_seg_us == 0) {
                     t_seg_us = tnow;
                 }
-                int64_t pos_ms = (tnow - t_seg_us) / 1000 - 360;
+                int64_t pos_ms = static_cast<int64_t>(total_audio_ms) - 80;
                 if (pos_ms < 0) {
                     pos_ms = 0;
                 }
+                // while 只保留最后一条(最新到期)上屏，避免墙钟跳跃时多条连发、
+                // 后句瞬间冲掉前句"句头"造成的丢字观感；过期条目直接跳过不显示。
+                bool have_due = false;
+                char shown[80];
                 while (cap_active && cap_next_t <= pos_ms) {
-                    char shown[48];
-                    // 有界拷贝，绝不越界读（cap_next_text 可能未以 NUL 结尾的极端情况）
                     strncpy(shown, cap_next_text, sizeof(shown) - 1);
                     shown[sizeof(shown) - 1] = '\0';
-                    if (display != nullptr) {
-                        Application::GetInstance().Schedule([shown]() {
-                            auto d = Board::GetInstance().GetDisplay();
-                            if (d != nullptr) {
-                                d->SetChatMessage("system", shown);
-                            }
-                        });
-                    }
+                    have_due = true;
                     cap_active = NextCaptionEntry(cap_p, cap_end, cap_next_t,
                                                   cap_next_text, sizeof(cap_next_text));
+                }
+                if (have_due && display != nullptr) {
+                    Application::GetInstance().Schedule([shown]() {
+                        auto d = Board::GetInstance().GetDisplay();
+                        if (d != nullptr) {
+                            d->SetChatMessage("system", shown);
+                        }
+                    });
                 }
             }
         }
@@ -509,17 +515,10 @@ void MusicPlayer::Run(TaskArgs* args) {
             }
         }
         ESP_LOGI(TAG, "有声书自动连播：%s", again ? "重发当前段" : "切换下一段");
-        // v92 计划性软复位：esp_opus/SILK 每包 ~45B 驻留不可回收（close+open
-        // 回收率实测=0，14:2x 三场 254-301 包崩），与其 255 包随机崩（伴
-        // 文件系统损坏风险），不如段界主动 esp_restart——堆全量归零、断点在
-        // 桥侧磁盘，用户一句"继续"无缝续读。约每 200 包（≈2 分钟）一次可控
-        // 重启，崩溃从事故变节奏。
-        if (total_packets >= 200 && !again && !stop_requested_.load()) {
-            ESP_LOGW(TAG, "MP-RST92 计划软复位 包=%u heap=%u（断点已存盘，说继续即续）",
-                     (unsigned)total_packets, (unsigned)esp_get_free_heap_size());
-            vTaskDelay(pdMS_TO_TICKS(800));
-            esp_restart();
-        }
+        // 2026-11-17 撤 v92 计划性软复位：SILK ~45B/包泄漏已由服务端强制 CELT 根治
+        // (CELT ~0B/包，实测6分40秒长流无重启)。原逻辑 total_packets>=200 主动 esp_restart，
+        // 在 CELT 单流下表现为"每读满一段(约3分钟)就重启"。段间已有 ResetDecoder+demuxer.Reset
+        // 兜底，无需再主动复位。保留注释记录这段历史，避免后人再踩。
         // v61 根治：段间重建 opus 解码器实例。实测 esp_opus 解码器处理
         // 语音类码流时每包在库内部多驻留 ~45B（歌曲流 0B/包），连续会话
         // 到 ~270 包必把小机堆耗干 abort。demuxer.Reset 只清容器状态不碰
